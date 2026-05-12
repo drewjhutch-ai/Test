@@ -17,3 +17,4 @@ xgboost>=2.0.0
 lightgbm>=4.1.0
 pybaseball>=2.2.7
 twilio>=8.0.0
+streamlit>=1.35.0
