@@ -162,6 +162,23 @@ def build_full_parlay_card(legs: list[ParlayLeg]) -> list[Parlay]:
     return parlays
 
 
+def _ml_to_decimal(price: int) -> float:
+    """American odds → decimal odds."""
+    if price > 0:
+        return price / 100 + 1
+    return 100 / abs(price) + 1
+
+
+def _decimal_to_american(dec: float) -> int:
+    """Decimal odds → American odds (rounded to nearest 5)."""
+    if dec >= 2.0:
+        raw = (dec - 1) * 100
+    else:
+        raw = -100 / (dec - 1)
+    # Round to nearest 5 (books price in 5-cent increments)
+    return int(round(raw / 5) * 5)
+
+
 def picks_to_legs(picks: list[PickCandidate], prices: dict[str, int]) -> list[ParlayLeg]:
     """
     Convert analyzed PickCandidates to ParlayLegs.
@@ -177,7 +194,7 @@ def picks_to_legs(picks: list[PickCandidate], prices: dict[str, int]) -> list[Pa
         if hr and not hr.parlay_eligible:
             continue
 
-        price = prices.get(pick.game_id, -110)
+        price = prices.get(pick.game_id, -120)  # -120 is more realistic MLB default
         true_prob = 1 - pick.losing_pct
 
         # Primary leg — full game ML
@@ -190,9 +207,9 @@ def picks_to_legs(picks: list[PickCandidate], prices: dict[str, int]) -> list[Pa
             description=f"{pick.backing_team} ML ({price:+d})",
         ))
 
-        # F5 ML variant — slightly better odds (books set F5 ML closer to fair)
-        f5_price = int(price * 0.80) if price < 0 else int(price * 0.85)
-        f5_prob = min(0.75, true_prob + 0.03)  # starter controls F5, slightly higher prob
+        # F5 ML — nearly identical to full game ML; typical difference is ±5 cents
+        f5_price = (price + 5) if price < 0 else (price - 5)
+        f5_prob = min(0.75, true_prob + 0.03)
         legs.append(ParlayLeg(
             pick=pick,
             market="f5_ml",
@@ -203,9 +220,12 @@ def picks_to_legs(picks: list[PickCandidate], prices: dict[str, int]) -> list[Pa
             tags=["f5_variant"],
         ))
 
-        # Run line variant — if pick is strong enough
+        # Run line (-1.5) — use decimal multiplier that matches real book pricing
+        # A -1.5 RL is worth ~1.15x the ML decimal for typical MLB favorites/dogs
         if pick.tier in ("STRONG", "MEDIUM") and true_prob >= 0.58:
-            rl_price = int(price * 0.55) if price < 0 else int(price * 1.40)
+            ml_dec = _ml_to_decimal(price)
+            rl_dec = ml_dec * 1.15
+            rl_price = _decimal_to_american(rl_dec)
             rl_prob = max(0.42, true_prob - 0.12)
             legs.append(ParlayLeg(
                 pick=pick,

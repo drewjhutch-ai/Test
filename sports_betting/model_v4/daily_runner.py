@@ -185,8 +185,8 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
         # Odds from parsed games
         odds_entry = odds_by_teams.get((home, away), {})
         dk_h2h = odds_entry.get("odds_by_book", {}).get("draftkings", {}).get("h2h", {})
-        home_price = dk_h2h.get("home_price", -110)
-        away_price = dk_h2h.get("away_price", +100)
+        home_price = dk_h2h.get("home_price", -120)
+        away_price = dk_h2h.get("away_price", +105)
 
         # Determine which side to analyze
         # Priority: backing team is the better pitcher's team
