@@ -499,7 +499,7 @@ def get_team_xwoba_luck() -> dict[str, dict]:
     try:
         from pybaseball import team_batting_bref
         season = date.today().year
-        df = team_batting_bref(season)
+        df = team_batting_bref(season, season)
         # Filter out summary rows
         df = df[~df.get("Tm", pd.Series(dtype=str)).isin(["", "LgAvg", "Total", "Avg"])]
         ops_vals = df["OPS"].dropna().apply(lambda x: _safe_float(x) or 0)

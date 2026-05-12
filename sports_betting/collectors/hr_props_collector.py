@@ -88,37 +88,40 @@ def get_batting_stats(season: int = None) -> dict[str, dict]:
             pass
 
     try:
-        import pybaseball
-        pybaseball.cache.enable()
-        df = pybaseball.batting_stats(season, qual=50)
+        from pybaseball import batting_stats_bref
+        df = batting_stats_bref(season)
 
         result = {}
         for _, row in df.iterrows():
             name = str(row.get("Name", "")).strip()
             if not name:
                 continue
-            last = name.split()[-1].lower() if name else ""
-            first = name.split()[0].lower() if name else ""
+            last  = name.split()[-1].lower()
+            first = name.split()[0].lower()
 
             games = float(row.get("G", 1) or 1)
-            hrs = float(row.get("HR", 0) or 0)
+            hrs   = float(row.get("HR", 0) or 0)
+            ba    = float(row.get("BA", 0.250) or 0.250)
+            slg   = float(row.get("SLG", 0.400) or 0.400)
+            obp   = float(row.get("OBP", 0.320) or 0.320)
+            iso   = round(slg - ba, 3)
 
             result[last] = {
-                "name": name,
-                "first": first,
-                "team": str(row.get("Team", "")),
-                "hr_rate": round(hrs / max(1, games), 4),
-                "hrs": int(hrs),
-                "games": int(games),
-                "woba": float(row.get("wOBA", 0.320) or 0.320),
-                "iso": float(row.get("ISO", 0.150) or 0.150),
-                "pull_pct": float(row.get("Pull%", 0.40) or 0.40),
+                "name":     name,
+                "first":    first,
+                "team":     str(row.get("Tm", "")),
+                "hr_rate":  round(hrs / max(1, games), 4),
+                "hrs":      int(hrs),
+                "games":    int(games),
+                "woba":     round(obp * 0.45 + slg * 0.55, 4),  # approximation
+                "iso":      iso,
+                "pull_pct": 0.40,  # not in BRef; use league average default
             }
 
         with open(cache_path, "w") as f:
             json.dump(result, f)
 
-        logger.info("FanGraphs batting stats fetched: %d batters", len(result))
+        logger.info("BRef batting stats fetched: %d batters", len(result))
         return result
 
     except Exception as e:
