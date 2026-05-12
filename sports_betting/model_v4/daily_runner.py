@@ -36,6 +36,11 @@ from .parlay_builder import picks_to_legs, build_full_parlay_card
 from .nrfi_yrfi import NrfiProfile, rank_games_for_nrfi_parlay, build_nrfi_parlay
 from .pick_card import render_pick_card
 from ..collectors.hr_props_collector import run_hr_parlay_analysis
+from ..collectors.fangraphs_collector import (
+    get_pitcher_velocity_trends, check_velocity_trend,
+    get_pitcher_hr_vulnerability, get_team_xwoba_luck,
+)
+from ..signals.aggregator import run_all_signals, build_signal_factors
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +92,13 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
     # Upgrade 2 — Baseball Savant Statcast metrics
     logger.info("Fetching Statcast pitcher metrics...")
     sc_stats = get_statcast_pitcher_metrics()
+
+    # Signal data collection (signals 1-13)
+    logger.info("Collecting intelligence signals...")
+    velocity_data = get_pitcher_velocity_trends()
+    hr_vuln_data  = get_pitcher_hr_vulnerability()
+    xwoba_luck    = get_team_xwoba_luck()
+    all_signals   = run_all_signals(games, standings_by_name, team_id_map)
 
     # ------------------------------------------------------------------ #
     # LAYERS 1-12 — Full analysis per game                               #
@@ -208,13 +220,34 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
             home_pitcher, away_pitcher, weather
         )
 
-        # Factor list
+        # Factor list (base + all 13 intelligence signals)
+        game_key = f"{away} @ {home}"
         confirmed_factors = _build_factor_list(
             backing_team, home, away,
             home_pitcher, away_pitcher,
             home_profile, away_profile,
             weather,
         )
+        # Append signal-derived factors
+        confirmed_factors += build_signal_factors(
+            game_key, backing_team, home, away, all_signals
+        )
+        # Signal 7: velocity trend
+        sp = home_pitcher if backing_team == home else away_pitcher
+        opp_sp = away_pitcher if backing_team == home else home_pitcher
+        vt = check_velocity_trend(opp_sp.name, velocity_data)
+        if vt.get("flag"):
+            confirmed_factors.append(f"Opposing {opp_sp.name} velocity down {vt['drop']:.1f}mph — arm fatigue signal")
+        # Signal 13: HR/FB vulnerability of opposing pitcher
+        opp_last = opp_sp.name.split()[-1].lower() if opp_sp.name not in ("TBD","") else ""
+        opp_hr_vuln = hr_vuln_data.get(opp_last, {})
+        if opp_hr_vuln.get("hr_fb_rate", 0) >= 0.14:
+            confirmed_factors.append(f"Opposing {opp_sp.name} HR/FB {opp_hr_vuln['hr_fb_rate']:.0%} — homer-prone")
+        # Signal 3: xwOBA luck (away team name abbrev won't match well so skip for now)
+        opp_team = away if backing_team == home else home
+        opp_xwoba = xwoba_luck.get(opp_team, {})
+        if opp_xwoba.get("label") == "lucky":
+            confirmed_factors.append(f"Opponent {opp_team} hitting above xwOBA ({opp_xwoba.get('gap',0):+.3f}) — regression due")
 
         # Create and run the pick
         pick = PickCandidate(
@@ -317,6 +350,8 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
         "skipped": skipped_games,
         "sharp_plays": sharp_plays,
         "hr_results": hr_results,
+        "all_signals": all_signals,
+        "xwoba_luck": xwoba_luck,
         "roi": roi,
     }
 

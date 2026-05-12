@@ -196,3 +196,71 @@ def wrigley_wind_signal(wind_speed: float, wind_dir_label: str) -> str:
     if wind_speed >= 6 and wind_dir_label == "in":
         return "NRFI LEAN"
     return "NEUTRAL"
+
+
+# ── Signal 10: Precise stadium wind orientations ──────────────────────
+# Home plate → CF compass bearing (degrees).
+# Wind bearing vs stadium bearing = true in/out/cross direction.
+# Source: stadium blueprints and satellite measurement.
+
+STADIUM_CF_BEARING: dict[str, float] = {
+    "Great American Ball Park (CIN)": 30,    # CF points NNE
+    "Coors Field (COL)":              330,   # CF points NNW
+    "Globe Life Field (TEX)":         None,  # dome
+    "Tropicana Field (TB)":           None,  # dome
+    "Rogers Centre (TOR)":            None,  # dome/retractable
+    "T-Mobile Park (SEA)":            None,  # retractable
+    "Minute Maid Park (HOU)":         None,  # retractable
+    "Petco Park (SD)":                315,   # CF points NW (marine layer)
+    "American Family Field (MIL)":    None,  # retractable
+    "Wrigley Field (CHC)":            88,    # CF points nearly due east — SW wind blows OUT
+    "Camden Yards (BAL)":             345,   # CF points NNW
+    "Fenway Park (BOS)":              30,    # CF points NNE
+    "Yankee Stadium (NYY)":           285,   # CF points WNW
+    "Sutter Health Park (ATH)":       320,   # CF NW
+    "loanDepot Park (MIA)":           None,  # retractable
+    "Chase Field (AZ)":               None,  # retractable
+    "Oracle Park (SF)":               310,   # CF NW — bay wind almost always blows IN
+    "Citizens Bank Park (PHI)":       15,    # CF points NNE
+    "Dodger Stadium (LAD)":           30,    # CF points NNE
+    "Target Field (MIN)":             350,   # CF points near north
+    "Truist Park (ATL)":              10,    # CF NNE
+    "PNC Park (PIT)":                 285,   # CF WNW
+    "Busch Stadium (STL)":            310,   # CF NW
+    "Kauffman Stadium (KC)":          350,   # CF north
+    "Progressive Field (CLE)":        330,   # CF NNW
+    "Guaranteed Rate Field (CWS)":    350,   # CF north
+    "Nationals Park (WSH)":           20,    # CF NNE
+    "Angel Stadium (LAA)":            310,   # CF NW
+    "Citi Field (NYM)":               30,    # CF NNE
+    "Oriole Park (BAL)":              345,   # same as Camden
+}
+
+
+def precise_wind_direction(home_team: str, wind_bearing_deg: float | None) -> str:
+    """
+    Signal 10: Compute true in/out/cross wind direction using stadium CF bearing.
+    Returns 'in', 'out', 'cross-L', 'cross-R', or 'calm'.
+    """
+    if wind_bearing_deg is None:
+        return "calm"
+
+    park_key = TEAM_TO_PARK.get(home_team, "")
+    cf_bearing = STADIUM_CF_BEARING.get(park_key)
+
+    if cf_bearing is None:
+        return "dome"  # dome/retractable — no wind effect
+
+    # Angle difference: how far wind deviates from CF line
+    diff = (wind_bearing_deg - cf_bearing + 360) % 360
+
+    # Wind blowing FROM the direction it's headed toward CF = blowing IN
+    # Wind blowing toward CF from behind home plate = blowing OUT
+    if diff <= 30 or diff >= 330:
+        return "in"       # wind blowing straight in from CF
+    elif 150 <= diff <= 210:
+        return "out"      # wind at back of batter, blowing toward CF
+    elif 30 < diff < 150:
+        return "cross-R"  # blowing right to left from batter's perspective
+    else:
+        return "cross-L"  # blowing left to right

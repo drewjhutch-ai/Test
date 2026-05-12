@@ -366,6 +366,94 @@ def render_nrfi_tab(nrfi_ranked: list, nrfi_parlay: dict | None = None):
     """)
 
 
+def render_intelligence_tab(all_signals: dict, xwoba_luck: dict, games: list):
+    """Signal 📡 Intelligence — all 13 signals summarized per game."""
+    from sports_betting.signals.clv_tracker import get_clv_summary
+
+    st.markdown("### 📡 Model Intelligence Dashboard")
+    st.caption("All 13 advanced signals running on today's slate. These feed directly into pick factor counts.")
+
+    # CLV summary at top
+    clv = get_clv_summary()
+    if clv["count"] > 0:
+        color = "green" if clv["is_sharp"] else "orange"
+        st.markdown(f"**Closing Line Value (CLV):** :{color}[{clv['assessment']}]")
+    else:
+        st.info("📈 CLV tracking starts as soon as you record your first bet and games complete. It will tell you if the model is genuinely sharp over time.")
+
+    if not all_signals:
+        st.info("Signal data will appear after the model runs. Press Run Model.")
+        return
+
+    # Per-game signal breakdown
+    st.markdown("---")
+    for game_key, signals in all_signals.items():
+
+        with st.expander(f"🔬 {game_key}", expanded=False):
+            col1, col2 = st.columns(2)
+
+            # Bullpen fatigue
+            with col1:
+                st.markdown("**💪 Bullpen Fatigue**")
+                for side in ("home", "away"):
+                    bp = signals.get("bullpen", {}).get(side, {})
+                    level = bp.get("fatigue_level", "unknown")
+                    score = bp.get("score", 0)
+                    color = "red" if score >= 0.6 else "orange" if score >= 0.4 else "green"
+                    st.markdown(f":{color}[{side.title()}: {level} ({score:.0%})]")
+                    if bp.get("note"):
+                        st.caption(bp["note"])
+
+            # Pythagorean luck
+            with col2:
+                st.markdown("**🍀 Pythagorean Luck**")
+                for side in ("home", "away"):
+                    py = signals.get("pythag", {}).get(side, {})
+                    luck = py.get("luck_score", 0)
+                    label = py.get("label", "neutral")
+                    color = "red" if "lucky" in label else "green" if "unlucky" in label else "gray"
+                    team = py.get("team", side)
+                    st.markdown(f":{color}[{team}: {luck:+.1f} wins ({label})]")
+
+            # Umpire
+            ump = signals.get("umpire", {})
+            if ump.get("name") and ump["name"] != "Unknown":
+                lean = ump.get("lean", "NEUTRAL")
+                color = "green" if lean == "OVER" else "red" if lean == "UNDER" else "gray"
+                st.markdown(f"**⚖️ Umpire:** {ump['name']} — :{color}[{lean} lean ({ump.get('over_rate',0.5):.0%} career over rate)]")
+                st.caption(ump.get("note", ""))
+
+            # Travel
+            travel = signals.get("travel", {})
+            for side in ("home", "away"):
+                tv = travel.get(side, {})
+                if tv.get("travel_flag"):
+                    st.markdown(f"**✈️ Travel:** :red[{tv['note']}]")
+
+            # Opener
+            opener = signals.get("opener", {})
+            for flag in opener.get("flags", []):
+                st.markdown(f"**🔄 Opener:** :orange[{flag}]")
+
+    # xwOBA team luck table
+    if xwoba_luck:
+        st.markdown("---")
+        st.markdown("### 🎯 Team xwOBA Luck Scores")
+        st.caption("Teams hitting above their expected wOBA are 'lucky' and due for regression. Teams below are buying low opportunities.")
+        rows = []
+        for team, data in sorted(xwoba_luck.items(), key=lambda x: x[1].get("gap", 0), reverse=True):
+            if data.get("woba", 0) > 0:
+                rows.append({
+                    "Team":   team,
+                    "wOBA":   f"{data.get('woba',0):.3f}",
+                    "xwOBA":  f"{data.get('xwoba',0):.3f}",
+                    "Gap":    f"{data.get('gap',0):+.3f}",
+                    "Status": data.get("label","?").upper(),
+                })
+        if rows:
+            st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+
 def render_hr_parlay_tab(hr_results: dict):
     st.markdown("### 💣 Home Run Parlay")
     st.caption("3-leg HR parlays built from batter barrel rate, park factor, pitcher vulnerability, weather, and odds value.")
@@ -550,6 +638,8 @@ def main():
     skipped      = results.get("skipped", [])
     sharp_plays  = results.get("sharp_plays", [])
     hr_results   = results.get("hr_results", {})
+    all_signals  = results.get("all_signals", {})
+    xwoba_luck   = results.get("xwoba_luck", {})
 
     active_count = len([p for p in picks if p.tier != "SKIP"])
 
@@ -559,6 +649,7 @@ def main():
         f"🎰 Parlays ({len(parlays)})",
         f"🚫 NRFI/YRFI ({len(nrfi_ranked)})",
         "💣 HR Parlays",
+        "📡 Intelligence",
         f"⏭️ Skipped ({len(skipped)})",
         "📊 Signal Performance",
         "📝 Record a Bet",
@@ -568,9 +659,10 @@ def main():
     with tabs[1]: render_parlays_tab(parlays, nrfi_parlay)
     with tabs[2]: render_nrfi_tab(nrfi_ranked, nrfi_parlay)
     with tabs[3]: render_hr_parlay_tab(hr_results)
-    with tabs[4]: render_skipped_tab(skipped)
-    with tabs[5]: render_signals_tab()
-    with tabs[6]: render_record_bet_tab()
+    with tabs[4]: render_intelligence_tab(all_signals, xwoba_luck, picks)
+    with tabs[5]: render_skipped_tab(skipped)
+    with tabs[6]: render_signals_tab()
+    with tabs[7]: render_record_bet_tab()
 
     # Sharp money alerts
     if sharp_plays:

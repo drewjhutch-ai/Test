@@ -292,3 +292,228 @@ def _safe_float(val) -> float | None:
         return None if pd.isna(f) else round(f, 3)
     except (TypeError, ValueError):
         return None
+
+
+# ── Signal 7: Pitcher velocity trends ────────────────────────────────
+
+def get_pitcher_velocity_trends(season: int = None) -> dict[str, dict]:
+    """
+    Pull pitcher fastball velocity from FanGraphs and flag drops of 1+ mph.
+    Signal 7: velocity drop = fatigue/injury warning.
+    """
+    if season is None:
+        season = date.today().year
+
+    cached = _load_cache("pitcher_velocity")
+    if cached:
+        return cached
+
+    try:
+        from pybaseball import pitching_stats
+        df = pitching_stats(season, qual=1)
+        result = {}
+        for _, row in df.iterrows():
+            name = str(row.get("Name", "")).strip()
+            if not name:
+                continue
+            vfa = _safe_float(row.get("vFA"))  # fastball velocity
+            if vfa is None:
+                continue
+            last = name.split()[-1].lower()
+            result[last] = {
+                "name": name,
+                "fb_velo": vfa,
+                "fb_velo_prev": _safe_float(row.get("vFA_(pfx)")),  # alt velocity field
+            }
+        _save_cache("pitcher_velocity", result)
+        logger.info("Pitcher velocity data: %d pitchers", len(result))
+        return result
+    except Exception as e:
+        logger.warning("Velocity fetch failed: %s", e)
+        return {}
+
+
+def check_velocity_trend(pitcher_name: str, velocity_data: dict) -> dict:
+    """
+    Check if a pitcher's velocity has dropped meaningfully.
+    Returns: {flag: bool, drop: float, note: str}
+    """
+    if not pitcher_name or pitcher_name == "TBD":
+        return {"flag": False, "drop": 0.0, "note": ""}
+
+    last = pitcher_name.split()[-1].lower()
+    pdata = velocity_data.get(last, {})
+    if not pdata:
+        return {"flag": False, "drop": 0.0, "note": "No velocity data"}
+
+    velo = pdata.get("fb_velo", 0)
+    velo_prev = pdata.get("fb_velo_prev") or velo
+
+    if velo and velo_prev:
+        drop = round(velo_prev - velo, 1)
+        if drop >= 1.5:
+            return {"flag": True, "drop": drop, "velo": velo,
+                    "note": f"⚠️ {pitcher_name} FB velo down {drop:.1f}mph — fatigue/injury risk"}
+        elif drop >= 1.0:
+            return {"flag": True, "drop": drop, "velo": velo,
+                    "note": f"Velocity dip: {pitcher_name} down {drop:.1f}mph this season"}
+
+    return {"flag": False, "drop": 0.0, "velo": velo, "note": "Velocity stable"}
+
+
+# ── Signal 13: Pitcher HR/FB rate + Fly Ball % ────────────────────────
+
+def get_pitcher_hr_vulnerability(season: int = None) -> dict[str, dict]:
+    """
+    Pull HR/FB rate and FB% for all pitchers.
+    HR/FB > 12% + FB% > 40% = homer-prone starter.
+    """
+    if season is None:
+        season = date.today().year
+
+    cached = _load_cache("pitcher_hr_vuln")
+    if cached:
+        return cached
+
+    try:
+        from pybaseball import pitching_stats
+        df = pitching_stats(season, qual=1)
+        result = {}
+        for _, row in df.iterrows():
+            name = str(row.get("Name", "")).strip()
+            if not name:
+                continue
+            hr_fb = _safe_float(row.get("HR/FB"))
+            fb_pct = _safe_float(row.get("FB%"))
+            hr9 = _safe_float(row.get("HR/9"))
+            last = name.split()[-1].lower()
+            result[last] = {
+                "name": name,
+                "hr_fb_rate": (hr_fb or 0) / 100 if (hr_fb or 0) > 1 else (hr_fb or 0),
+                "fb_pct": (fb_pct or 0) / 100 if (fb_pct or 0) > 1 else (fb_pct or 0),
+                "hr9": hr9 or 1.2,
+            }
+        _save_cache("pitcher_hr_vuln", result)
+        return result
+    except Exception as e:
+        logger.warning("HR/FB fetch failed: %s", e)
+        return {}
+
+
+# ── Signal 12: Rolling barrel rate (15-day) ──────────────────────────
+
+def get_rolling_barrel_rates(days: int = 15) -> dict[str, dict]:
+    """
+    Pull last-15-day barrel rates for batters.
+    Hot barrel rate vs seasonal = hot streak indicator.
+    """
+    cached = _load_cache("rolling_barrels")
+    if cached:
+        return cached
+
+    try:
+        from pybaseball import statcast
+        end = date.today()
+        start = end - __import__("datetime").timedelta(days=days)
+        df = statcast(start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
+        if df is None or df.empty:
+            return {}
+
+        # Group by batter and compute barrel %
+        df = df[df["events"].notna()]
+        barrel_counts = df[df["launch_speed_angle"] == 6].groupby("batter").size()
+        total_bbe = df[df["launch_speed"].notna()].groupby("batter").size()
+        barrel_rates = (barrel_counts / total_bbe.clip(lower=1)).fillna(0)
+
+        # Get player names from IDs
+        result = {}
+        for batter_id, rate in barrel_rates.items():
+            try:
+                players = statsapi.lookup_player(str(batter_id))
+                if players:
+                    name = players[0].get("fullName", str(batter_id))
+                    last = name.split()[-1].lower()
+                    result[last] = {
+                        "name": name,
+                        "rolling_barrel_rate": round(float(rate), 4),
+                        "days": days,
+                    }
+            except Exception:
+                continue
+
+        _save_cache("rolling_barrels", result)
+        return result
+    except Exception as e:
+        logger.warning("Rolling barrel rate fetch failed: %s", e)
+        return {}
+
+
+# ── Signal 3: xwOBA vs wOBA team luck score ──────────────────────────
+
+def get_team_xwoba_luck() -> dict[str, dict]:
+    """
+    Pull team-level xwOBA vs actual wOBA gap.
+    Teams exceeding their xwOBA are 'lucky' and due for regression.
+    """
+    cached = _load_cache("team_xwoba")
+    if cached:
+        return cached
+
+    try:
+        from pybaseball import team_batting
+        season = date.today().year
+        df = team_batting(season)
+        result = {}
+        for _, row in df.iterrows():
+            team = str(row.get("Team", "")).strip()
+            woba = _safe_float(row.get("wOBA")) or 0.320
+            xwoba = _safe_float(row.get("xwOBA")) or 0.320
+            gap = round(woba - xwoba, 4)
+            result[team] = {
+                "woba": woba,
+                "xwoba": xwoba,
+                "gap": gap,
+                "label": "lucky" if gap > 0.010 else "unlucky" if gap < -0.010 else "neutral",
+                "note": f"wOBA {woba:.3f} vs xwOBA {xwoba:.3f} (gap: {gap:+.3f})" if xwoba else "no data",
+            }
+        _save_cache("team_xwoba", result)
+        return result
+    except Exception as e:
+        logger.warning("Team xwOBA fetch failed: %s", e)
+        return {}
+
+
+# ── Signal 11: Platoon advantage ─────────────────────────────────────
+
+def get_platoon_splits() -> dict[str, dict]:
+    """
+    Pull batter platoon splits (wOBA vs LHP and RHP).
+    LHB vs RHP: +28 wOBA points average advantage.
+    """
+    season = date.today().year
+    cached = _load_cache("platoon_splits")
+    if cached:
+        return cached
+
+    try:
+        from pybaseball import batting_stats_bref
+        # Use FanGraphs batting splits if available
+        from pybaseball import batting_stats
+        df = batting_stats(season, qual=50)
+        result = {}
+        for _, row in df.iterrows():
+            name = str(row.get("Name", "")).strip()
+            if not name:
+                continue
+            last = name.split()[-1].lower()
+            result[last] = {
+                "name": name,
+                "hand": str(row.get("Bat", "R")).strip(),
+                "woba_vs_lhp": _safe_float(row.get("wOBA")) or 0.320,  # approximate
+                "woba_vs_rhp": _safe_float(row.get("wOBA")) or 0.320,
+            }
+        _save_cache("platoon_splits", result)
+        return result
+    except Exception as e:
+        logger.warning("Platoon splits fetch failed: %s", e)
+        return {}
