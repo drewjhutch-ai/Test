@@ -153,8 +153,8 @@ def render_picks_tab(picks: list):
         <h3 style="color:#FAFAFA;margin:8px 0">
             {_short(potd.away_team)} @ {_short(potd.home_team)}
         </h3>
-        <p style="color:#00D4AA;font-size:18px;margin:4px 0">
-            {potd.recommended_market or potd.proposed_market}
+        <p style="color:#00D4AA;font-size:22px;font-weight:bold;margin:4px 0">
+            BET: {_short(potd.backing_team)} &nbsp;({potd.recommended_market or potd.proposed_market})
         </p>
         <p style="color:#FFD700;font-size:16px;margin:4px 0">
             {potd.tier} — {units}u / ${units * UNIT_SIZE} &nbsp;|&nbsp;
@@ -173,6 +173,7 @@ def render_picks_tab(picks: list):
         rows.append({
             "":         TIER_EMOJI.get(p.tier, "•"),
             "Game":     f"{_short(p.away_team)} @ {_short(p.home_team)}",
+            "BET THIS": f"➜ {_short(p.backing_team)}",
             "Market":   p.recommended_market or p.proposed_market or "ML",
             "Tier":     p.tier,
             "Bet":      f"{u}u / ${u * UNIT_SIZE}",
@@ -187,11 +188,12 @@ def render_picks_tab(picks: list):
         hide_index=True,
         use_container_width=True,
         column_config={
-            "":        st.column_config.TextColumn("", width=30),
-            "Tier":    st.column_config.TextColumn("Tier", width=80),
-            "Bet":     st.column_config.TextColumn("Bet", width=90),
-            "Factors": st.column_config.NumberColumn("✓", width=50),
-            "Lose %":  st.column_config.TextColumn("Lose %", width=70),
+            "":          st.column_config.TextColumn("", width=30),
+            "BET THIS":  st.column_config.TextColumn("BET THIS", width=110),
+            "Tier":      st.column_config.TextColumn("Tier", width=80),
+            "Bet":       st.column_config.TextColumn("Bet", width=90),
+            "Factors":   st.column_config.NumberColumn("✓", width=50),
+            "Lose %":    st.column_config.TextColumn("Lose %", width=70),
         }
     )
 
