@@ -209,56 +209,63 @@ def render_picks_tab(picks: list):
 
 
 def render_parlays_tab(parlays: list, nrfi_parlay: dict | None):
-    if not parlays and not nrfi_parlay:
-        st.info("No parlays met EV thresholds today.")
+    st.markdown("### 🎰 Daily Parlay Card")
+    st.caption("All 5 parlays generated daily. ⭐ = model's highest-confidence selection. ⚠️ = below optimal EV threshold but best available legs.")
+
+    if not parlays:
+        st.info("No picks available to build parlays — run the model first.")
         return
 
-    parlay_labels = {
-        0: ("P1 — Anchor 2-Leg", "🥇", "$35-$40"),
-        1: ("P2 — Core 3-Leg",   "🥈", "$15-$20"),
-        2: ("P3 — Science 4-Leg","🥉", "$10-$15"),
-        3: ("P4 — Push 5-Leg",   "🎯", "$5-$10"),
-        4: ("P5 — Moonshot 6+",  "🌙", "$5"),
-    }
+    parlay_meta = [
+        ("P1 — Anchor 2-Leg",  "🥇", "$35–$40"),
+        ("P2 — Core 3-Leg",    "🥈", "$15–$20"),
+        ("P3 — Science 4-Leg", "🥉", "$10–$15"),
+        ("P4 — Push 5-Leg",    "🎯", "$5–$10"),
+        ("P5 — Moonshot 6-Leg","🌙", "$5"),
+    ]
 
     for i, parlay in enumerate(parlays):
         parlay.compute()
-        label, icon, stake = parlay_labels.get(i, (f"Parlay {i+1}", "🎰", "$5-$10"))
+        label, icon, stake = parlay_meta[i] if i < len(parlay_meta) else (f"Parlay {i+1}", "🎰", "$5")
+
+        # Star if EV is solidly positive, warn if forced below threshold
+        star = "⭐ " if parlay.ev_pct >= 0.10 and not parlay.below_threshold else ""
+        warn = " ⚠️ Below EV Threshold — best available legs" if parlay.below_threshold else ""
 
         with st.container():
-            st.markdown(f"### {icon} {label}")
+            st.markdown(f"### {icon} {star}{label}{warn}")
             col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Odds",    f"+{parlay.american_odds}")
-            col2.metric("Stake",   stake)
-            col3.metric("Win",     f"~${parlay.payout_per_unit:.0f}")
-            col4.metric("EV",      f"{parlay.ev_pct:+.1%}")
+            col1.metric("Odds",  f"+{parlay.american_odds:,}")
+            col2.metric("Stake", stake)
+            col3.metric("Win",   f"~${parlay.payout_per_unit:.0f}")
+            ev_color = "normal" if parlay.ev_pct >= 0 else "inverse"
+            col4.metric("EV", f"{parlay.ev_pct:+.1%}", delta_color=ev_color)
 
             leg_rows = []
             for j, leg in enumerate(parlay.legs, 1):
                 leg_rows.append({
-                    "Leg": j,
-                    "Game":   f"{_short(leg.pick.away_team)} @ {_short(leg.pick.home_team)}",
-                    "Market": leg.market[:20],
-                    "Price":  f"{leg.price:+d}",
-                    "True Prob": f"{leg.true_prob:.0%}",
-                    "Lose %": f"{leg.lose_pct:.0%}",
+                    "Leg":      j,
+                    "BET":      f"➜ {_short(leg.pick.backing_team)}",
+                    "Game":     f"{_short(leg.pick.away_team)} @ {_short(leg.pick.home_team)}",
+                    "Market":   leg.market[:20],
+                    "Price":    f"{leg.price:+d}",
+                    "Win Prob": f"{leg.true_prob:.0%}",
                 })
             st.dataframe(pd.DataFrame(leg_rows), hide_index=True, use_container_width=True)
 
-            independence = parlay.independence_notes[0] if parlay.independence_notes else ""
-            color = "green" if "PASS" in independence else "red"
-            st.markdown(f":{color}[{independence}]")
+            note = parlay.independence_notes[0] if parlay.independence_notes else ""
+            color = "green" if "PASS" in note else "orange"
+            st.markdown(f":{color}[{note}]")
             st.markdown("---")
 
-    # NRFI parlay
+    # NRFI parlay bonus
     if nrfi_parlay and isinstance(nrfi_parlay, dict):
-        st.markdown("### 🚫 NRFI Parlay")
+        st.markdown("### 🚫 NRFI Bonus Parlay")
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Type",  nrfi_parlay.get("type", ""))
         col2.metric("Odds",  nrfi_parlay.get("american_odds", ""))
         col3.metric("Stake", nrfi_parlay.get("recommended_stake", ""))
         col4.metric("Win",   f"~${nrfi_parlay.get('potential_win', 0):.0f}")
-
         legs = nrfi_parlay.get("legs", [])
         if legs:
             rows = [{"Game": g.get("game","?"),
@@ -267,35 +274,172 @@ def render_parlays_tab(parlays: list, nrfi_parlay: dict | None):
             st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
 
-def render_nrfi_tab(nrfi_ranked: list):
+def render_nrfi_tab(nrfi_ranked: list, nrfi_parlay: dict | None = None):
     if not nrfi_ranked:
         st.info("No NRFI data available.")
         return
 
+    # Top 2 starred picks
+    nrfi_games = [g for g in nrfi_ranked if g.get("lean") == "NRFI"]
+    yrfi_games = [g for g in nrfi_ranked if g.get("lean") == "YRFI"]
+    top_nrfi = nrfi_games[:2]
+
+    if top_nrfi:
+        st.markdown("### ⭐ Top NRFI Picks Today")
+        cols = st.columns(len(top_nrfi))
+        for i, g in enumerate(top_nrfi):
+            with cols[i]:
+                prob = g.get("nrfi_probability", 0)
+                st.markdown(f"""
+                <div style="background:#1A2B1A;border:2px solid #FFD700;border-radius:10px;padding:14px;text-align:center">
+                    <div style="color:#FFD700;font-size:22px">⭐</div>
+                    <div style="color:#FAFAFA;font-weight:bold;font-size:15px">{g.get('game','?')}</div>
+                    <div style="color:#00D4AA;font-size:24px;font-weight:bold">{prob:.0%} NRFI</div>
+                    <div style="color:#AAA;font-size:12px">{g.get('home_pitcher','?')} vs {g.get('away_pitcher','?')}</div>
+                    <div style="color:#888;font-size:11px">{g.get('tier','?')}</div>
+                </div>
+                """, unsafe_allow_html=True)
+        st.markdown("")
+
+    # NRFI/YRFI parlay
+    eligible = [g for g in nrfi_ranked if g.get("parlay_eligible")]
+    if len(eligible) >= 3:
+        import math
+        def nrfi_to_american(p):
+            if p <= 0 or p >= 1:
+                return -110
+            dec = 1 / p
+            if dec >= 2.0:
+                return int((dec - 1) * 100)
+            return int(-100 / (dec - 1))
+
+        for parlay_size in [5, 4, 3]:
+            legs = eligible[:parlay_size]
+            if len(legs) < parlay_size:
+                continue
+            combined_prob = math.prod(g.get("nrfi_probability", 0.6) for g in legs)
+            combined_dec = math.prod(1 / max(0.01, g.get("nrfi_probability", 0.6)) for g in legs)
+            ev = (combined_prob * combined_dec) - 1
+            am_odds = nrfi_to_american(combined_prob)
+            if am_odds < 0:
+                payout = abs(100 / am_odds) * 10 + 10
+            else:
+                payout = (am_odds / 100) * 10 + 10
+
+            star = "⭐ " if ev > 0.05 else ""
+            st.markdown(f"### 🚫 {star}NRFI {parlay_size}-Leg Parlay")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Combined Odds", f"+{abs(am_odds):,}" if am_odds > 0 else f"{am_odds:,}")
+            c2.metric("Win Prob",  f"{combined_prob:.1%}")
+            c3.metric("EV",       f"{ev:+.1%}")
+            prows = [{"Game": g.get("game","?"), "NRFI %": f"{g.get('nrfi_probability',0):.1%}",
+                      "SP (Home)": g.get("home_pitcher","?"), "SP (Away)": g.get("away_pitcher","?")}
+                     for g in legs]
+            st.dataframe(pd.DataFrame(prows), hide_index=True, use_container_width=True)
+            st.caption("Stake recommendation: $10 for 3-leg · $7 for 4-leg · $5 for 5-leg")
+            break  # show only the best size
+        st.markdown("---")
+
+    # Full rankings table
+    st.markdown("### 📊 Full NRFI/YRFI Rankings")
     rows = []
-    for g in nrfi_ranked:
+    for i, g in enumerate(nrfi_ranked):
         nrfi = g.get("nrfi_probability", 0)
         lean = g.get("lean", "?")
+        star = "⭐ " if i < 2 and lean == "NRFI" else ""
         rows.append({
+            "":             star,
             "Game":         g.get("game", "?"),
             "Home SP":      g.get("home_pitcher", "?"),
             "Away SP":      g.get("away_pitcher", "?"),
             "NRFI %":       f"{nrfi:.1%}",
             "YRFI %":       f"{g.get('yrfi_probability', 0):.1%}",
             "Lean":         lean,
-            "Parlay?":      "✅ Yes" if g.get("parlay_eligible") else "❌ No",
+            "Parlay?":      "✅" if g.get("parlay_eligible") else "❌",
             "Tier":         g.get("tier", "?"),
         })
 
-    df = pd.DataFrame(rows)
-    st.dataframe(df, hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
     st.markdown("""
-    **NRFI Guide**
-    - ✅ **Parlay eligible** = 70%+ probability
-    - 🏟️ Dome games get a +5% boost (most reliable)
-    - ❄️ Temps below 55°F = additional NRFI lean
-    - 💨 Wind blowing IN = additional NRFI lean
+    **Guide** · ✅ Parlay eligible = 70%+ · 🏟️ Dome = most reliable · ❄️ Cold = NRFI lean · 💨 Wind in = NRFI lean
+    """)
+
+
+def render_hr_parlay_tab(hr_results: dict):
+    st.markdown("### 💣 Home Run Parlay")
+    st.caption("3-leg HR parlays built from batter barrel rate, park factor, pitcher vulnerability, weather, and odds value.")
+
+    if not hr_results or not hr_results.get("candidates"):
+        st.info(hr_results.get("data_note", "No HR prop data available. Add ODDS_API_KEY in Streamlit secrets to enable live odds."))
+        st.markdown("""
+        **How this works once enabled:**
+        - Pulls live HR prop odds from DraftKings via The Odds API
+        - Scores each batter on 5 factors: HR rate, pitcher vulnerability, park factor, weather, handedness splits
+        - Builds 3 different 3-leg parlays: Best overall · Best EV · Moonshot (highest odds)
+        - ⭐ = model's highest confidence selection
+        """)
+        return
+
+    st.caption(hr_results.get("data_note", ""))
+
+    # Parlays first
+    for parlay in hr_results.get("parlays", []):
+        star = "⭐ " if parlay.get("starred") else ""
+        odds = parlay.get("combined_odds", 0)
+        odds_str = f"+{odds:,}" if odds > 0 else f"{odds:,}"
+        ev = parlay.get("ev_pct", 0)
+
+        st.markdown(f"### 🎯 {star}{parlay.get('label','Parlay')}")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Odds",     odds_str)
+        c2.metric("Win Prob", f"{parlay.get('combined_prob',0):.1%}")
+        c3.metric("EV",       f"{ev:+.1%}")
+        c4.metric("Stake",    parlay.get("stake_rec", "$5"))
+
+        leg_rows = []
+        for j, leg in enumerate(parlay.get("legs", []), 1):
+            leg_rows.append({
+                "Leg":      j,
+                "Batter":   leg.get("batter", "?"),
+                "Game":     leg.get("game", "?"),
+                "Price":    f"{leg.get('price',0):+d}",
+                "HR Prob":  f"{leg.get('composite_prob',0):.1%}",
+                "Barrel %": f"{leg.get('barrel_rate',0):.1%}",
+                "Hard Hit": f"{leg.get('hard_hit_rate',0):.1%}",
+                "Book":     leg.get("book", "DK"),
+            })
+        st.dataframe(pd.DataFrame(leg_rows), hide_index=True, use_container_width=True)
+        st.markdown("---")
+
+    # Top HR candidates table
+    candidates = hr_results.get("candidates", [])
+    if candidates:
+        with st.expander(f"📋 All HR Candidates Ranked ({len(candidates)} batters scored)"):
+            c_rows = []
+            for i, c in enumerate(candidates[:20], 1):
+                star_c = "⭐" if c.get("starred") else ""
+                c_rows.append({
+                    "":         star_c,
+                    "Batter":   c.get("batter","?"),
+                    "Game":     c.get("game","?"),
+                    "Price":    f"{c.get('price',0):+d}",
+                    "HR Prob":  f"{c.get('composite_prob',0):.1%}",
+                    "EV":       f"{c.get('ev_pct',0):+.1%}",
+                    "Factors":  c.get("factors_passed",0),
+                    "Rec":      c.get("recommendation","?"),
+                })
+            st.dataframe(pd.DataFrame(c_rows), hide_index=True, use_container_width=True)
+
+    st.markdown("""
+    **HR Factor Scoring**
+    - **F1** Batter HR rate this season (HRs/game)
+    - **F2** Pitcher HR vulnerability (HR/9, barrel rate, HR/FB rate)
+    - **F3** Park HR factor (Coors, Yankee Stadium, etc.)
+    - **F4** Weather (wind out, temperature)
+    - **F5** Handedness wOBA split (batter vs pitcher hand)
+
+    ⭐ = 4+ factors confirmed · Stake max $10 on any single HR parlay · HR props are lottery tickets by nature
     """)
 
 
@@ -405,15 +549,16 @@ def main():
     nrfi_ranked  = results.get("nrfi_ranked", [])
     skipped      = results.get("skipped", [])
     sharp_plays  = results.get("sharp_plays", [])
+    hr_results   = results.get("hr_results", {})
 
     active_count = len([p for p in picks if p.tier != "SKIP"])
-    parlay_count = len(parlays) + (1 if nrfi_parlay else 0)
 
     # Tabs
     tabs = st.tabs([
         f"🎯 Picks ({active_count})",
-        f"🎰 Parlays ({parlay_count})",
+        f"🎰 Parlays ({len(parlays)})",
         f"🚫 NRFI/YRFI ({len(nrfi_ranked)})",
+        "💣 HR Parlays",
         f"⏭️ Skipped ({len(skipped)})",
         "📊 Signal Performance",
         "📝 Record a Bet",
@@ -421,10 +566,11 @@ def main():
 
     with tabs[0]: render_picks_tab(picks)
     with tabs[1]: render_parlays_tab(parlays, nrfi_parlay)
-    with tabs[2]: render_nrfi_tab(nrfi_ranked)
-    with tabs[3]: render_skipped_tab(skipped)
-    with tabs[4]: render_signals_tab()
-    with tabs[5]: render_record_bet_tab()
+    with tabs[2]: render_nrfi_tab(nrfi_ranked, nrfi_parlay)
+    with tabs[3]: render_hr_parlay_tab(hr_results)
+    with tabs[4]: render_skipped_tab(skipped)
+    with tabs[5]: render_signals_tab()
+    with tabs[6]: render_record_bet_tab()
 
     # Sharp money alerts
     if sharp_plays:

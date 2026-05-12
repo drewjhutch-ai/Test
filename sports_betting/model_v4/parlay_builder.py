@@ -64,6 +64,8 @@ class Parlay:
     combined_decimal: float = 0.0
     ev_pct: float = 0.0
     independence_notes: list[str] = field(default_factory=list)
+    forced: bool = False        # True when built despite low EV (daily guarantee)
+    below_threshold: bool = False  # True when EV below target but still shown
 
     def compute(self):
         self.combined_decimal = math.prod(leg.decimal_odds for leg in self.legs)
@@ -102,21 +104,24 @@ class Parlay:
         return True
 
 
-def build_parlay(legs: list[ParlayLeg], template_key: str) -> Parlay | None:
+def build_parlay(legs: list[ParlayLeg], template_key: str, force: bool = False) -> Parlay | None:
     """
     Attempt to build a parlay from a list of eligible legs using the given template.
-    Returns None if legs don't meet quality requirements.
+    force=True: always return a parlay using best available legs even if EV threshold not met.
     """
     t = PARLAY_TEMPLATES[template_key]
     needed = t["legs"]
     max_lose = t["max_lose_pct"]
 
-    eligible = [leg for leg in legs if leg.lose_pct <= max_lose and leg.true_prob >= (1 - max_lose)]
+    # With force mode, relax lose_pct filter so we always have enough legs
+    if force:
+        eligible = sorted(legs, key=lambda l: l.true_prob, reverse=True)
+    else:
+        eligible = [leg for leg in legs if leg.lose_pct <= max_lose and leg.true_prob >= (1 - max_lose)]
 
     if len(eligible) < needed:
         return None
 
-    # Take the needed highest-confidence legs
     eligible.sort(key=lambda l: l.true_prob, reverse=True)
     chosen = eligible[:needed]
 
@@ -125,6 +130,7 @@ def build_parlay(legs: list[ParlayLeg], template_key: str) -> Parlay | None:
         legs=chosen,
         stake_low=t["stake_range"][0],
         stake_high=t["stake_range"][1],
+        forced=force,
     )
     parlay.compute()
 
@@ -132,19 +138,23 @@ def build_parlay(legs: list[ParlayLeg], template_key: str) -> Parlay | None:
         return None
 
     if parlay.ev_pct < t["target_ev"]:
-        return None  # Doesn't meet EV threshold
+        if not force:
+            return None
+        parlay.below_threshold = True
 
     return parlay
 
 
 def build_full_parlay_card(legs: list[ParlayLeg]) -> list[Parlay]:
     """
-    Build the full P1-P5 parlay card from available eligible legs.
-    Respects all hard rules and EV thresholds.
+    Build the full P1-P5 parlay card. Always returns all 5 parlays — first tries
+    to meet EV thresholds, falls back to force-building with best available legs.
     """
     parlays = []
     for key in ["P1", "P2", "P3", "P4", "P5"]:
-        p = build_parlay(legs, key)
+        p = build_parlay(legs, key, force=False)
+        if not p:
+            p = build_parlay(legs, key, force=True)
         if p:
             parlays.append(p)
     return parlays

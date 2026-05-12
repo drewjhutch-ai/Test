@@ -35,6 +35,7 @@ from .layer_engine import (
 from .parlay_builder import picks_to_legs, build_full_parlay_card
 from .nrfi_yrfi import NrfiProfile, rank_games_for_nrfi_parlay, build_nrfi_parlay
 from .pick_card import render_pick_card
+from ..collectors.hr_props_collector import run_hr_parlay_analysis
 
 logger = logging.getLogger(__name__)
 
@@ -283,6 +284,13 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
     if nrfi_parlay:
         logger.info("NRFI 5-leg parlay built: %s", nrfi_parlay.get("american_odds"))
 
+    # HR parlay analysis
+    weather_by_game = {
+        f"{g.get('away_team','?')} @ {g.get('home_team','?')}": g.get("weather_raw", {})
+        for g in parsed_games
+    }
+    hr_results = run_hr_parlay_analysis(parsed_games, weather_by_game)
+
     # Sharp money
     sharp_plays = detect_wiseguy_moves(parsed_games)
 
@@ -308,6 +316,7 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
         "nrfi_ranked": nrfi_ranked,
         "skipped": skipped_games,
         "sharp_plays": sharp_plays,
+        "hr_results": hr_results,
         "roi": roi,
     }
 
