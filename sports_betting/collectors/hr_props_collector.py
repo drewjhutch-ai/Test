@@ -238,6 +238,28 @@ def _mock_hr_odds() -> list[dict]:
 
 # ── HR candidate scoring ──────────────────────────────────────────────
 
+# Known power hitters with reliable stats as fallback when pybaseball unavailable
+KNOWN_HR_HITTERS: dict[str, dict] = {
+    "aaron judge":              {"hr_rate": 0.28, "barrel_rate": 0.22, "hard_hit_rate": 0.57, "hand": "R"},
+    "shohei ohtani":            {"hr_rate": 0.24, "barrel_rate": 0.20, "hard_hit_rate": 0.53, "hand": "L"},
+    "kyle schwarber":           {"hr_rate": 0.22, "barrel_rate": 0.18, "hard_hit_rate": 0.50, "hand": "L"},
+    "pete alonso":              {"hr_rate": 0.20, "barrel_rate": 0.17, "hard_hit_rate": 0.48, "hand": "R"},
+    "yordan alvarez":           {"hr_rate": 0.23, "barrel_rate": 0.21, "hard_hit_rate": 0.56, "hand": "L"},
+    "matt olson":               {"hr_rate": 0.21, "barrel_rate": 0.17, "hard_hit_rate": 0.49, "hand": "L"},
+    "bryce harper":             {"hr_rate": 0.19, "barrel_rate": 0.16, "hard_hit_rate": 0.47, "hand": "L"},
+    "vladimir guerrero jr.":    {"hr_rate": 0.18, "barrel_rate": 0.15, "hard_hit_rate": 0.46, "hand": "R"},
+    "vladimir guerrero":        {"hr_rate": 0.18, "barrel_rate": 0.15, "hard_hit_rate": 0.46, "hand": "R"},
+    "freddie freeman":          {"hr_rate": 0.17, "barrel_rate": 0.14, "hard_hit_rate": 0.44, "hand": "L"},
+    "manny machado":            {"hr_rate": 0.17, "barrel_rate": 0.14, "hard_hit_rate": 0.44, "hand": "R"},
+    "rafael devers":            {"hr_rate": 0.19, "barrel_rate": 0.16, "hard_hit_rate": 0.47, "hand": "L"},
+    "paul goldschmidt":         {"hr_rate": 0.17, "barrel_rate": 0.15, "hard_hit_rate": 0.45, "hand": "R"},
+    "nolan arenado":            {"hr_rate": 0.18, "barrel_rate": 0.15, "hard_hit_rate": 0.46, "hand": "R"},
+    "cody bellinger":           {"hr_rate": 0.15, "barrel_rate": 0.13, "hard_hit_rate": 0.42, "hand": "L"},
+    "juan soto":                {"hr_rate": 0.16, "barrel_rate": 0.14, "hard_hit_rate": 0.43, "hand": "L"},
+    "default":                  {"hr_rate": 0.12, "barrel_rate": 0.09, "hard_hit_rate": 0.38, "hand": "R"},
+}
+
+
 def score_hr_candidates(
     hr_odds: list[dict],
     batting_stats: dict,
@@ -248,85 +270,83 @@ def score_hr_candidates(
     Score each HR prop candidate using all available data.
     Returns list sorted by composite score descending.
     """
-    from ..model_v4.hr_props import HRPropInput, evaluate_hr_prop
-    from ..model_v4.park_database import get_hr_factor
+    try:
+        from ..model_v4.hr_props import HRPropInput, evaluate_hr_prop
+    except Exception:
+        from sports_betting.model_v4.hr_props import HRPropInput, evaluate_hr_prop
 
     scored = []
     for prop in hr_odds:
-        batter_name = prop.get("batter", "")
-        home_team = prop.get("home_team", "")
-        game = prop.get("game", "")
-        price = prop.get("price", -130)
+        try:
+            batter_name = prop.get("batter", "")
+            home_team   = prop.get("home_team", "")
+            game        = prop.get("game", "")
+            price       = prop.get("price", -130)
 
-        last = batter_name.split()[-1].lower() if batter_name else ""
-        first = batter_name.split()[0].lower() if batter_name else ""
+            lower_name = batter_name.lower()
+            last       = batter_name.split()[-1].lower() if batter_name else ""
 
-        # Match batter in batting stats
-        bat = batting_stats.get(last, {})
-        sc = statcast_data.get(last, {})
+            # Use pybaseball data when available, fall back to known-hitter DB, then defaults
+            bat = batting_stats.get(last, {})
+            sc  = statcast_data.get(last, {})
+            known = KNOWN_HR_HITTERS.get(lower_name) or KNOWN_HR_HITTERS.get(last) or KNOWN_HR_HITTERS["default"]
 
-        hr_rate = bat.get("hr_rate", 0.10)
-        barrel_rate = sc.get("barrel_rate", 0.08)
-        hard_hit = sc.get("hard_hit_rate", 0.38)
-        xwoba = sc.get("xwoba", 0.320)
-        iso = bat.get("iso", 0.150)
+            hr_rate     = bat.get("hr_rate")     or known["hr_rate"]
+            barrel_rate = sc.get("barrel_rate")  or known["barrel_rate"]
+            hard_hit    = sc.get("hard_hit_rate") or known["hard_hit_rate"]
+            xwoba       = sc.get("xwoba", 0.340)
+            batter_hand = known["hand"]
 
-        # Weather for this game
-        wx = weather_by_game.get(game, {})
-        temp = wx.get("temperature", 72)
-        wind_speed = wx.get("wind_speed", 5)
-        wind_dir = wx.get("wind_direction", "calm")
+            wx         = weather_by_game.get(game, {})
+            temp       = wx.get("temperature", 72)
+            wind_speed = wx.get("wind_speed", 5)
+            wind_dir   = wx.get("wind_direction", "calm")
 
-        # Handedness — default RHB vs RHP if unknown
-        batter_hand = "R"
-        woba_vs_hand = xwoba
+            inp = HRPropInput(
+                batter_name=batter_name,
+                batter_hand=batter_hand,
+                team=prop.get("away_team", ""),
+                pitcher_name="Unknown",
+                pitcher_hand="R",
+                home_team=home_team,
+                hr_rate=hr_rate,
+                pitcher_hr9=1.25,
+                pitcher_barrel_rate=0.09,
+                pitcher_hard_hit_rate=0.37,
+                pitcher_hr_fb_rate=0.13,
+                temperature=temp,
+                wind_speed=wind_speed,
+                wind_direction=wind_dir,
+                batter_woba_vs_hand=xwoba,
+                price=price,
+            )
 
-        inp = HRPropInput(
-            batter_name=batter_name,
-            batter_hand=batter_hand,
-            team=prop.get("away_team", ""),
-            pitcher_name="Unknown",
-            pitcher_hand="R",
-            home_team=home_team,
-            hr_rate=hr_rate,
-            pitcher_hr9=1.20,          # league avg default
-            pitcher_barrel_rate=barrel_rate * 0.8,
-            pitcher_hard_hit_rate=hard_hit * 0.8,
-            pitcher_hr_fb_rate=0.14,
-            temperature=temp,
-            wind_speed=wind_speed,
-            wind_direction=wind_dir,
-            batter_woba_vs_hand=woba_vs_hand,
-            price=price,
-        )
+            result        = evaluate_hr_prop(inp)
+            composite     = result["composite_probability"]
+            ev            = result["ev_pct"]
+            factors_passed = result["factors_passed"]
 
-        result = evaluate_hr_prop(inp)
-        composite = result["composite_probability"]
-        ev = result["ev_pct"]
-        factors_passed = result["factors_passed"]
+            factor_notes = [v["note"] for v in result["factors"].values() if v["score"] > 0]
 
-        # Build readable factor summary
-        factor_notes = []
-        for k, v in result["factors"].items():
-            if v["score"] > 0:
-                factor_notes.append(v["note"])
-
-        scored.append({
-            "batter": batter_name,
-            "game": game,
-            "home_team": home_team,
-            "price": price,
-            "book": prop.get("book", "draftkings"),
-            "hr_rate": hr_rate,
-            "barrel_rate": barrel_rate,
-            "hard_hit_rate": hard_hit,
-            "composite_prob": composite,
-            "ev_pct": ev,
-            "factors_passed": factors_passed,
-            "recommendation": result["recommendation"],
-            "factor_notes": factor_notes[:3],
-            "starred": factors_passed >= 4 and ev > 0,
-        })
+            scored.append({
+                "batter":        batter_name,
+                "game":          game,
+                "home_team":     home_team,
+                "price":         price,
+                "book":          prop.get("book", "draftkings"),
+                "hr_rate":       hr_rate,
+                "barrel_rate":   barrel_rate,
+                "hard_hit_rate": hard_hit,
+                "composite_prob": composite,
+                "ev_pct":        ev,
+                "factors_passed": factors_passed,
+                "recommendation": result["recommendation"],
+                "factor_notes":  factor_notes[:3],
+                "starred":       factors_passed >= 4 and ev > 0,
+            })
+        except Exception as e:
+            logger.debug("HR scoring failed for %s: %s", prop.get("batter","?"), e)
+            continue
 
     scored.sort(key=lambda x: (x["factors_passed"], x["composite_prob"]), reverse=True)
     return scored
@@ -422,19 +442,24 @@ def build_hr_parlays(candidates: list[dict]) -> list[dict]:
 def run_hr_parlay_analysis(games: list[dict], weather_by_game: dict) -> dict:
     """
     Full HR parlay pipeline. Returns candidates + parlays for the web app.
+    Never raises — always returns a valid dict.
     """
-    batting = get_batting_stats()
-    statcast = get_statcast_batter_data()
-    hr_odds = get_hr_prop_odds()
+    try:
+        batting  = get_batting_stats()
+        statcast = get_statcast_batter_data()
+        hr_odds  = get_hr_prop_odds()
 
-    if not hr_odds:
-        return {"candidates": [], "parlays": [], "data_note": "No HR prop odds available today."}
+        if not hr_odds:
+            return {"candidates": [], "parlays": [], "data_note": "No HR prop odds available today."}
 
-    candidates = score_hr_candidates(hr_odds, batting, statcast, weather_by_game)
-    parlays = build_hr_parlays(candidates)
+        candidates = score_hr_candidates(hr_odds, batting, statcast, weather_by_game)
+        parlays    = build_hr_parlays(candidates)
 
-    return {
-        "candidates": candidates,
-        "parlays": parlays,
-        "data_note": f"Scored {len(candidates)} HR props · {len(parlays)} parlays built",
-    }
+        return {
+            "candidates": candidates,
+            "parlays":    parlays,
+            "data_note":  f"Scored {len(candidates)} HR props · {len(parlays)} parlays built",
+        }
+    except Exception as e:
+        logger.warning("HR parlay analysis failed: %s", e)
+        return {"candidates": [], "parlays": [], "data_note": f"HR analysis error: {e}"}

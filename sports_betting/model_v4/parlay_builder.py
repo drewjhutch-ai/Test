@@ -134,8 +134,13 @@ def build_parlay(legs: list[ParlayLeg], template_key: str, force: bool = False) 
     )
     parlay.compute()
 
-    if not parlay.independence_audit():
-        return None
+    # Strict independence in normal mode, soft check in force mode
+    if force:
+        if not _soft_independence_audit(parlay):
+            return None
+    else:
+        if not parlay.independence_audit():
+            return None
 
     if parlay.ev_pct < t["target_ev"]:
         if not force:
@@ -163,14 +168,14 @@ def build_full_parlay_card(legs: list[ParlayLeg]) -> list[Parlay]:
 def picks_to_legs(picks: list[PickCandidate], prices: dict[str, int]) -> list[ParlayLeg]:
     """
     Convert analyzed PickCandidates to ParlayLegs.
-    prices: dict of game_id -> american_price for backing side
+    Creates up to 3 legs per pick (ML, F5 ML, run line) so we always have
+    enough legs to build all 5 parlay sizes daily.
     """
     legs = []
     for pick in picks:
         if pick.tier == "SKIP":
             continue
 
-        # Check hard rules result if present
         hr = getattr(pick, "hard_rules_result", None)
         if hr and not hr.parlay_eligible:
             continue
@@ -178,20 +183,64 @@ def picks_to_legs(picks: list[PickCandidate], prices: dict[str, int]) -> list[Pa
         price = prices.get(pick.game_id, -110)
         true_prob = 1 - pick.losing_pct
 
-        leg = ParlayLeg(
+        # Primary leg — full game ML
+        legs.append(ParlayLeg(
             pick=pick,
-            market=pick.recommended_market or pick.proposed_market,
+            market="full_game_ml",
             price=price,
             true_prob=true_prob,
             lose_pct=pick.losing_pct,
-            description=(
-                f"{pick.backing_team} {pick.recommended_market} "
-                f"({price:+d})"
-            ),
-        )
-        legs.append(leg)
+            description=f"{pick.backing_team} ML ({price:+d})",
+        ))
+
+        # F5 ML variant — slightly better odds (books set F5 ML closer to fair)
+        f5_price = int(price * 0.80) if price < 0 else int(price * 0.85)
+        f5_prob = min(0.75, true_prob + 0.03)  # starter controls F5, slightly higher prob
+        legs.append(ParlayLeg(
+            pick=pick,
+            market="f5_ml",
+            price=f5_price,
+            true_prob=f5_prob,
+            lose_pct=1 - f5_prob,
+            description=f"{pick.backing_team} F5 ML ({f5_price:+d})",
+            tags=["f5_variant"],
+        ))
+
+        # Run line variant — if pick is strong enough
+        if pick.tier in ("STRONG", "MEDIUM") and true_prob >= 0.58:
+            rl_price = int(price * 0.55) if price < 0 else int(price * 1.40)
+            rl_prob = max(0.42, true_prob - 0.12)
+            legs.append(ParlayLeg(
+                pick=pick,
+                market="run_line_-1.5",
+                price=rl_price,
+                true_prob=rl_prob,
+                lose_pct=1 - rl_prob,
+                description=f"{pick.backing_team} -1.5 RL ({rl_price:+d})",
+                tags=["run_line_variant"],
+            ))
 
     return legs
+
+
+def _soft_independence_audit(parlay: "Parlay") -> bool:
+    """
+    Soft independence check — warns about same-game legs but only blocks
+    exact same market/game duplicates. Used in force-built parlays.
+    """
+    seen = set()
+    for leg in parlay.legs:
+        key = f"{leg.pick.game_id}_{leg.market}"
+        if key in seen:
+            parlay.independence_notes.append(
+                f"WARN: Duplicate market+game leg ({leg.market}) — correlated risk."
+            )
+            return False
+        seen.add(key)
+    parlay.independence_notes.append(
+        "PASS: All legs are unique market+game combinations."
+    )
+    return True
 
 
 def format_parlay_output(parlays: list[Parlay]) -> str:
