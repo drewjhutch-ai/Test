@@ -500,19 +500,28 @@ def get_team_xwoba_luck() -> dict[str, dict]:
         from pybaseball import team_batting_bref
         season = date.today().year
         df = team_batting_bref(season, season)
-        # Filter out summary rows
-        df = df[~df.get("Tm", pd.Series(dtype=str)).isin(["", "LgAvg", "Total", "Avg"])]
-        ops_vals = df["OPS"].dropna().apply(lambda x: _safe_float(x) or 0)
-        league_ops = ops_vals.mean() if len(ops_vals) > 0 else 0.720
+
+        # Identify team column (BRef uses "Tm" or "Team")
+        tm_col = "Tm" if "Tm" in df.columns else ("Team" if "Team" in df.columns else None)
+        if tm_col:
+            df = df[~df[tm_col].astype(str).isin(["", "LgAvg", "Total", "Avg", "nan"])]
+
+        # Coerce OPS/OBP/SLG to numeric — BRef summary rows can contain "---"
+        for col in ("OPS", "OBP", "SLG"):
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        ops_col  = df["OPS"].dropna() if "OPS" in df.columns else pd.Series(dtype=float)
+        league_ops = float(ops_col.mean()) if len(ops_col) > 0 else 0.720
+
         result = {}
         for _, row in df.iterrows():
-            team = str(row.get("Tm", "")).strip()
-            if not team:
+            team = str(row.get(tm_col or "Tm", "")).strip() if tm_col else ""
+            if not team or team in ("", "nan"):
                 continue
             ops  = _safe_float(row.get("OPS")) or league_ops
             obp  = _safe_float(row.get("OBP")) or 0.320
             slg  = _safe_float(row.get("SLG")) or 0.400
-            # Approximate wOBA from OBP/SLG (wOBA ≈ 0.45*OBP + 0.55*SLG roughly)
             woba_approx = round(obp * 0.45 + slg * 0.55, 4)
             ops_gap = round(ops - league_ops, 4)
             result[team] = {
