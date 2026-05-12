@@ -212,6 +212,28 @@ def init_db():
                 updated_at TEXT DEFAULT (datetime('now'))
             );
 
+            CREATE TABLE IF NOT EXISTS model_weights (
+                weight_key TEXT PRIMARY KEY,
+                weight_value REAL NOT NULL,
+                sample_size INTEGER DEFAULT 0,
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS factor_performance (
+                factor_key TEXT PRIMARY KEY,
+                wins INTEGER DEFAULT 0,
+                losses INTEGER DEFAULT 0,
+                weight REAL DEFAULT 1.0,
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS market_performance (
+                market TEXT PRIMARY KEY,
+                wins INTEGER DEFAULT 0,
+                losses INTEGER DEFAULT 0,
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
+
             CREATE INDEX IF NOT EXISTS idx_odds_game ON odds_snapshots(game_id, snapshot_time);
             CREATE INDEX IF NOT EXISTS idx_movements_game ON line_movements(game_id, movement_time);
             CREATE INDEX IF NOT EXISTS idx_value_bets_detected ON value_bets(detected_at);

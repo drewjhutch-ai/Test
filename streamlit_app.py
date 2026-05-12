@@ -846,37 +846,108 @@ def render_skipped_tab(skipped: list):
 
 
 def render_signals_tab():
+    st.markdown("""
+    <div style="margin-bottom:16px">
+        <div style="color:#f1f5f9;font-size:20px;font-weight:800">📊 Model Evolution</div>
+        <div style="color:#475569;font-size:12px;margin-top:2px">
+            Self-improvement engine · learns from every graded pick · updates automatically
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Load learned weights
+    try:
+        from sports_betting.models.weight_trainer import load_learned_weights
+        weights = load_learned_weights()
+    except Exception:
+        weights = {}
+
+    sample = weights.get("sample_size", 0)
+    needed = 20
+    pct    = min(1.0, sample / needed)
+
+    # Progress toward first retraining
+    st.markdown(f"""
+    <div style="background:#111827;border:1px solid #1e293b;border-radius:12px;padding:20px 24px;margin-bottom:16px">
+        <div style="display:flex;justify-content:space-between;margin-bottom:8px">
+            <span style="color:#f1f5f9;font-weight:700">Training Progress</span>
+            <span style="color:#f59e0b;font-weight:700">{sample} / {needed} graded picks</span>
+        </div>
+        <div style="background:#1e293b;border-radius:999px;height:8px;overflow:hidden">
+            <div style="background:linear-gradient(90deg,#f59e0b,#10b981);width:{pct*100:.0f}%;height:100%;border-radius:999px;transition:width 0.5s"></div>
+        </div>
+        <div style="color:#475569;font-size:11px;margin-top:6px">
+            {'🎓 Model is actively retraining from real results' if sample >= needed else f'Model needs {needed - sample} more graded picks before weight adjustment begins'}
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Thresholds section
+    thresholds = weights.get("thresholds", {})
+    if thresholds:
+        st.markdown("#### Current Tier Thresholds")
+        tier_colors = {"STRONG": "#ef4444", "MEDIUM": "#f59e0b", "LEAN": "#94a3b8", "SKIP": "#334155"}
+        cols = st.columns(4)
+        for i, (tier, vals) in enumerate(thresholds.items()):
+            lo, hi = vals[0], vals[1]
+            with cols[i % 4]:
+                c = tier_colors.get(tier, "#94a3b8")
+                st.markdown(f"""
+                <div style="background:#111827;border:1px solid #1e293b;border-left:3px solid {c};
+                            border-radius:10px;padding:12px 16px;margin-bottom:8px">
+                    <div style="color:{c};font-size:11px;font-weight:700">{tier}</div>
+                    <div style="color:#f1f5f9;font-size:14px;font-weight:700">Lose {lo:.0%}–{hi:.0%}</div>
+                    <div style="color:#475569;font-size:10px">{'Default' if lo in (0.0, 0.25, 0.32, 0.40) else 'Learned ✓'}</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+    # Market performance
+    market_weights = weights.get("markets", {})
+    if market_weights:
+        st.markdown("#### Market Win Rates (Learned)")
+        mkt_rows = []
+        for mkt, win_rate in sorted(market_weights.items(), key=lambda x: x[1], reverse=True):
+            status = "✅ Boosted" if win_rate >= 0.60 else ("⚠️ Penalized" if win_rate < 0.48 else "→ Neutral")
+            mkt_rows.append({"Market": mkt, "Win Rate": f"{win_rate:.1%}", "Status": status})
+        if mkt_rows:
+            st.dataframe(pd.DataFrame(mkt_rows), hide_index=True, use_container_width=True)
+
+    # Factor performance
+    factor_weights = weights.get("factors", {})
+    if factor_weights:
+        st.markdown("#### Factor Performance (Learned)")
+        f_rows = []
+        for fk, mult in sorted(factor_weights.items(), key=lambda x: x[1], reverse=True):
+            status = "🔥 Elite" if mult >= 1.3 else ("✅ Strong" if mult >= 1.1 else ("⚠️ Weak" if mult < 0.9 else "→ Neutral"))
+            f_rows.append({"Factor Signal": fk.replace("_", " ").title(), "Weight": f"x{mult:.2f}", "Status": status})
+        if f_rows:
+            st.dataframe(pd.DataFrame(f_rows), hide_index=True, use_container_width=True)
+
+    # Legacy signal tracker
+    st.markdown("#### Signal Hit Rates (All Time)")
     report = cached_signals()
-    if not report:
-        st.info("Signal data builds up as bets are graded. Check back after the first week of picks.")
-        return
-
-    rows = []
-    for s in report:
-        hr = s["hit_rate"]
-        w  = s["current_weight"]
-        rows.append({
-            "Signal":   s["signal"],
-            "Bets":     s["bets"],
-            "Wins":     s["wins"],
-            "Hit Rate": hr,
-            "Weight":   w,
-            "Status":   "↑ Boosted" if w > 1.05 else "↓ Penalized" if w < 0.95 else "→ Neutral",
-        })
-
-    df = pd.DataFrame(rows)
-    st.dataframe(
-        df,
-        hide_index=True,
-        use_container_width=True,
-        column_config={
-            "Hit Rate": st.column_config.ProgressColumn(
-                "Hit Rate", min_value=0, max_value=1, format="%.1%"
-            ),
-            "Weight": st.column_config.NumberColumn("Weight", format="%.3f"),
-        }
-    )
-    st.caption("Weights auto-adjust after every game cycle. Signals hitting >60% get boosted.")
+    if report:
+        rows = []
+        for s in report:
+            hr = s["hit_rate"]
+            w  = s["current_weight"]
+            rows.append({
+                "Signal":   s["signal"],
+                "Bets":     s["bets"],
+                "Wins":     s["wins"],
+                "Hit Rate": hr,
+                "Weight":   w,
+                "Status":   "↑ Boosted" if w > 1.05 else "↓ Penalized" if w < 0.95 else "→ Neutral",
+            })
+        df = pd.DataFrame(rows)
+        st.dataframe(df, hide_index=True, use_container_width=True,
+            column_config={
+                "Hit Rate": st.column_config.ProgressColumn("Hit Rate", min_value=0, max_value=1, format="%.1%"),
+                "Weight": st.column_config.NumberColumn("Weight", format="%.3f"),
+            })
+    else:
+        st.info("Signal data builds as bets are graded. Check back after the first week.")
+    st.caption("Weights auto-adjust after every cycle. Signals hitting >60% get boosted, <48% get penalized.")
 
 
 def render_record_bet_tab(picks: list = None, parlays: list = None, nrfi_ranked: list = None, hr_results: dict = None):

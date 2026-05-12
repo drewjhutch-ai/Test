@@ -30,8 +30,11 @@ from ..analysis.signal_tracker import update_signal_performance
 from .pitcher_lists import is_on_fade_list, is_on_backs_list, is_era_fraud
 from .hard_rules import run_all_hard_rules_for_card, check_seven_day_cap
 from .layer_engine import (
-    PickCandidate, PitcherProfile, TeamProfile, WeatherProfile, run_all_layers
+    PickCandidate, PitcherProfile, TeamProfile, WeatherProfile, run_all_layers,
+    update_tier_thresholds,
 )
+from ..models.outcome_grader import grade_all_pending
+from ..models.weight_trainer import run_full_retrain, load_learned_weights
 from .parlay_builder import picks_to_legs, build_full_parlay_card
 from .nrfi_yrfi import NrfiProfile, rank_games_for_nrfi_parlay, build_nrfi_parlay
 from .pick_card import render_pick_card
@@ -69,6 +72,32 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
             "Season: %d-%d | ROI: %.2f%% | Hit Rate: %.1f%%",
             roi["wins"], roi["losses"], roi["roi"], roi["hit_rate"] * 100
         )
+
+    # Grade pending bets with real MLB scores
+    logger.info("Phase 0: Grading pending bets from MLB API...")
+    try:
+        graded = grade_all_pending(days_back=3)
+        if graded:
+            logger.info("Graded %d bets from real game results", graded)
+    except Exception as e:
+        logger.warning("Outcome grader error: %s", e)
+
+    # Self-improvement: retrain weights from graded picks
+    try:
+        retrain_result = run_full_retrain()
+        logger.info("Weight retrain: %s", retrain_result.get("status"))
+    except Exception as e:
+        logger.warning("Weight retrain error: %s", e)
+
+    # Load learned weights (dynamic thresholds + factor multipliers)
+    learned_weights = load_learned_weights()
+    logger.info("Loaded learned weights: %d factors, %d markets, sample_size=%d",
+                len(learned_weights.get("factors", {})),
+                len(learned_weights.get("markets", {})),
+                learned_weights.get("sample_size", 0))
+
+    # Apply dynamic tier thresholds to layer engine
+    update_tier_thresholds(learned_weights.get("thresholds", {}))
 
     # ------------------------------------------------------------------ #
     # PHASE 1 — Data pull                                                 #
@@ -353,6 +382,7 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
         "all_signals": all_signals,
         "xwoba_luck": xwoba_luck,
         "roi": roi,
+        "learned_weights": learned_weights,
     }
 
 

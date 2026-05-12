@@ -13,6 +13,23 @@ from .park_database import get_park, is_dome, get_run_factor, wrigley_wind_signa
 logger = logging.getLogger(__name__)
 
 
+# Dynamic tier thresholds — updated by weight_trainer when 50+ graded picks exist
+_TIER_THRESHOLDS: dict = {
+    "STRONG": (0.00, 0.25),
+    "MEDIUM": (0.25, 0.32),
+    "LEAN":   (0.32, 0.40),
+    "SKIP":   (0.40, 1.00),
+}
+
+
+def update_tier_thresholds(thresholds: dict) -> None:
+    """Called by daily_runner after loading learned weights."""
+    global _TIER_THRESHOLDS
+    if thresholds:
+        _TIER_THRESHOLDS.update(thresholds)
+        logger.info("Tier thresholds updated from learned weights: %s", thresholds)
+
+
 # ------------------------------------------------------------------ #
 #  Data structures                                                     #
 # ------------------------------------------------------------------ #
@@ -653,12 +670,7 @@ def layer_10_losing_scenario(
     pick.losing_scenario = losing_scenario_text
     pick.losing_pct = estimated_lose_pct
 
-    tier_map = {
-        "STRONG":  (0.00, 0.25),
-        "MEDIUM":  (0.25, 0.32),
-        "LEAN":    (0.32, 0.40),
-        "SKIP":    (0.40, 1.00),
-    }
+    tier_map = _TIER_THRESHOLDS
 
     assigned_tier = "SKIP"
     for tier, (lo, hi) in tier_map.items():
