@@ -273,7 +273,11 @@ def render_header(roi: dict):
 
 
 def render_picks_tab(picks: list):
-    active = [p for p in picks if p.tier != "SKIP"]
+    tier_order = {"STRONG": 0, "MEDIUM": 1, "LEAN": 2}
+    active = sorted(
+        [p for p in picks if p.tier != "SKIP"],
+        key=lambda p: (tier_order.get(p.tier, 9), -(p.factor_count or 0)),
+    )
 
     if not active:
         st.markdown("""
@@ -317,9 +321,17 @@ def render_picks_tab(picks: list):
     </div>
     """)
 
-    # Picks cards
+    # Picks cards grouped by tier
     tier_colors = {"STRONG": "#ef4444", "MEDIUM": "#f59e0b", "LEAN": "#94a3b8"}
+    tier_labels = {"STRONG": "🔴 Strong Plays", "MEDIUM": "🟡 Medium Plays", "LEAN": "⚪ Lean Plays"}
+    current_tier = None
     for p in active:
+        if p.tier != current_tier:
+            current_tier = p.tier
+            label = tier_labels.get(p.tier, p.tier)
+            tc_hdr = tier_colors.get(p.tier, "#94a3b8")
+            st.html(f'<div style="color:{tc_hdr};font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.1em;margin:18px 0 8px 2px">{label}</div>')
+
         u = UNIT_MAP.get(p.tier, 1)
         mkt = html_lib.escape(p.recommended_market or p.proposed_market or "ML")
         tc = tier_colors.get(p.tier, "#94a3b8")
