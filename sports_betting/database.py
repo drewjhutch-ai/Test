@@ -237,6 +237,20 @@ def upsert_game(game_data: dict):
 
 def insert_odds_snapshot(data: dict):
     with get_db() as conn:
+        # Ensure a parent game row exists before inserting odds (FK constraint)
+        conn.execute("""
+            INSERT OR IGNORE INTO games (game_id, home_team, away_team, game_date, status)
+            VALUES (:game_id,
+                    COALESCE(:home_team, 'Unknown'),
+                    COALESCE(:away_team, 'Unknown'),
+                    COALESCE(:game_date, date('now')),
+                    'scheduled')
+        """, {
+            "game_id":   data.get("game_id"),
+            "home_team": data.get("home_team"),
+            "away_team": data.get("away_team"),
+            "game_date": data.get("game_date"),
+        })
         conn.execute("""
             INSERT INTO odds_snapshots
             (game_id, book, market, home_line, away_line, home_price, away_price,
@@ -259,6 +273,10 @@ def get_latest_odds(game_id: str, book: str, market: str):
 def save_value_bet(data: dict):
     with get_db() as conn:
         conn.execute("""
+            INSERT OR IGNORE INTO games (game_id, home_team, away_team, game_date, status)
+            VALUES (:game_id, 'Unknown', 'Unknown', date('now'), 'scheduled')
+        """, {"game_id": data.get("game_id")})
+        conn.execute("""
             INSERT INTO value_bets
             (game_id, book, market, side, book_price, model_probability, implied_probability,
              edge, kelly_fraction, recommended_bet, confidence, factors)
@@ -280,6 +298,10 @@ def save_arb_opportunity(data: dict):
 
 def save_sharp_play(data: dict):
     with get_db() as conn:
+        conn.execute("""
+            INSERT OR IGNORE INTO games (game_id, home_team, away_team, game_date, status)
+            VALUES (:game_id, 'Unknown', 'Unknown', date('now'), 'scheduled')
+        """, {"game_id": data.get("game_id")})
         conn.execute("""
             INSERT INTO sharp_plays
             (game_id, side, market, signal_type, signal_strength, opening_line,
