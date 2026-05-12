@@ -497,34 +497,37 @@ def get_team_xwoba_luck() -> dict[str, dict]:
         return cached
 
     try:
-        from pybaseball import team_batting_bref
+        # Use MLB Stats API — same source used by mlb_collector.py
         season = date.today().year
-        df = team_batting_bref(season, season)
+        resp = requests.get(
+            "https://statsapi.mlb.com/api/v1/teams/stats",
+            params={"stats": "season", "group": "hitting", "season": season, "sportId": 1},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        records = resp.json().get("stats", [{}])[0].get("splits", [])
 
-        # Identify team column (BRef uses "Tm" or "Team")
-        tm_col = "Tm" if "Tm" in df.columns else ("Team" if "Team" in df.columns else None)
-        if tm_col:
-            df = df[~df[tm_col].astype(str).isin(["", "LgAvg", "Total", "Avg", "nan"])]
+        ops_values = []
+        rows = []
+        for rec in records:
+            stat = rec.get("stat", {})
+            team_info = rec.get("team", {})
+            team_name = team_info.get("name", "")
+            if not team_name:
+                continue
+            obp = _safe_float(stat.get("obp")) or 0.320
+            slg = _safe_float(stat.get("slg")) or 0.400
+            ops = round(obp + slg, 4)
+            ops_values.append(ops)
+            rows.append((team_name, obp, slg, ops))
 
-        # Coerce OPS/OBP/SLG to numeric — BRef summary rows can contain "---"
-        for col in ("OPS", "OBP", "SLG"):
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-
-        ops_col  = df["OPS"].dropna() if "OPS" in df.columns else pd.Series(dtype=float)
-        league_ops = float(ops_col.mean()) if len(ops_col) > 0 else 0.720
+        league_ops = round(sum(ops_values) / len(ops_values), 4) if ops_values else 0.720
 
         result = {}
-        for _, row in df.iterrows():
-            team = str(row.get(tm_col or "Tm", "")).strip() if tm_col else ""
-            if not team or team in ("", "nan"):
-                continue
-            ops  = _safe_float(row.get("OPS")) or league_ops
-            obp  = _safe_float(row.get("OBP")) or 0.320
-            slg  = _safe_float(row.get("SLG")) or 0.400
+        for team_name, obp, slg, ops in rows:
             woba_approx = round(obp * 0.45 + slg * 0.55, 4)
             ops_gap = round(ops - league_ops, 4)
-            result[team] = {
+            result[team_name] = {
                 "woba":  woba_approx,
                 "xwoba": woba_approx,
                 "gap":   ops_gap,
