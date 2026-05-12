@@ -106,6 +106,109 @@ def record_placed_bet(
     )
 
 
+def auto_record_model_picks(picks: list, parlays: list, date_str: str) -> int:
+    """
+    Automatically record all model picks and parlay selections so the model
+    can learn from its own output — not just bets you manually log.
+    Confidence = 'MODEL_PICK' for singles, 'MODEL_PARLAY' for parlay legs.
+    Uses INSERT OR IGNORE on (game_id, confidence) to avoid duplicates on
+    re-runs.
+    """
+    recorded = 0
+    today = date_str or datetime.now().strftime("%Y-%m-%d")
+
+    with get_db() as conn:
+        # ── Single picks (POTD + all active picks) ──────────────────────
+        for pick in picks:
+            if getattr(pick, "tier", "SKIP") == "SKIP":
+                continue
+            game_id = f"model_{today}_{getattr(pick, 'game_id', 'unknown')}"
+            mkt = getattr(pick, "recommended_market", "") or getattr(pick, "proposed_market", "full_game_ml")
+            backing = getattr(pick, "backing_team", "")
+            tier = getattr(pick, "tier", "LEAN")
+            units = {"STRONG": 3, "MEDIUM": 2, "LEAN": 1}.get(tier, 1)
+            factors = getattr(pick, "factors", [])
+            ev = getattr(pick, "ev_pct", 0.0)
+            prob = 1.0 - getattr(pick, "losing_pct", 0.5)
+
+            # Deduplicate: skip if already recorded for today
+            existing = conn.execute(
+                "SELECT id FROM value_bets WHERE game_id = ? AND confidence = 'MODEL_PICK' LIMIT 1",
+                (game_id,)
+            ).fetchone()
+            if existing:
+                continue
+
+            conn.execute("""
+                INSERT INTO games (game_id, home_team, away_team, game_date, status)
+                VALUES (?, ?, ?, ?, 'scheduled')
+                ON CONFLICT(game_id) DO NOTHING
+            """, (game_id, getattr(pick, "home_team", ""), getattr(pick, "away_team", ""), today))
+
+            conn.execute("""
+                INSERT INTO value_bets
+                (game_id, book, market, side, book_price, model_probability,
+                 implied_probability, edge, kelly_fraction, recommended_bet,
+                 confidence, factors)
+                VALUES (?, 'draftkings', ?, ?, 0, ?, 0, ?, 0, ?, 'MODEL_PICK', ?)
+            """, (
+                game_id, mkt, backing.lower(),
+                round(prob, 4), round(ev, 4),
+                float(units * 5),
+                json.dumps(factors[:8]),
+            ))
+            recorded += 1
+
+        # ── Parlay picks ─────────────────────────────────────────────────
+        parlay_labels = ["P1_Anchor", "P2_Core", "P3_Science", "P4_Push", "P5_Moonshot"]
+        for pi, parlay in enumerate(parlays):
+            plabel = parlay_labels[pi] if pi < len(parlay_labels) else f"P{pi+1}"
+            parlay_id = f"model_{today}_{plabel}"
+            legs = getattr(parlay, "legs", [])
+            total_legs = len(legs)
+
+            for j, leg in enumerate(legs, 1):
+                game_id = f"{parlay_id}_leg{j}"
+                existing = conn.execute(
+                    "SELECT id FROM value_bets WHERE game_id = ? AND confidence = 'MODEL_PARLAY' LIMIT 1",
+                    (game_id,)
+                ).fetchone()
+                if existing:
+                    continue
+
+                pick_ref = getattr(leg, "pick", None)
+                gid_raw  = getattr(pick_ref, "game_id", "unknown") if pick_ref else "unknown"
+                backing  = getattr(pick_ref, "backing_team", "") if pick_ref else ""
+                home     = getattr(pick_ref, "home_team", "") if pick_ref else ""
+                away     = getattr(pick_ref, "away_team", "") if pick_ref else ""
+
+                conn.execute("""
+                    INSERT INTO games (game_id, home_team, away_team, game_date, status)
+                    VALUES (?, ?, ?, ?, 'scheduled')
+                    ON CONFLICT(game_id) DO NOTHING
+                """, (game_id, home, away, today))
+
+                conn.execute("""
+                    INSERT INTO value_bets
+                    (game_id, book, market, side, book_price, model_probability,
+                     implied_probability, edge, kelly_fraction, recommended_bet,
+                     confidence, factors)
+                    VALUES (?, 'draftkings', ?, ?, ?, ?, 0, 0, 0, 0, 'MODEL_PARLAY', ?)
+                """, (
+                    game_id,
+                    getattr(leg, "market", "ml"),
+                    backing.lower(),
+                    getattr(leg, "price", 0),
+                    round(getattr(leg, "true_prob", 0.5), 4),
+                    json.dumps([f"parlay:{parlay_id}", f"leg:{j}of{total_legs}",
+                                f"label:{plabel}", f"game:{gid_raw}"]),
+                ))
+                recorded += 1
+
+    logger.info("Auto-recorded %d model picks/parlay legs for %s", recorded, today)
+    return recorded
+
+
 def update_signal_performance():
     """
     After games complete, calculate per-signal win rates and

@@ -55,9 +55,106 @@ def cached_signals():
 # ── Helpers ───────────────────────────────────────────────────────────
 
 TIER_EMOJI  = {"STRONG": "🔥", "MEDIUM": "✅", "LEAN": "📌", "SKIP": "❌"}
-TIER_COLOR  = {"STRONG": "#00FF88", "MEDIUM": "#FFD700", "LEAN": "#FFFFFF", "SKIP": "#666"}
+TIER_COLOR  = {"STRONG": "#ef4444", "MEDIUM": "#f59e0b", "LEAN": "#94a3b8", "SKIP": "#334155"}
 UNIT_MAP    = {"STRONG": 3, "MEDIUM": 2, "LEAN": 1}
 UNIT_SIZE   = 5
+
+
+def inject_css():
+    st.markdown("""
+    <style>
+    /* ── Global ── */
+    .stApp { background: #0a0e1a; }
+    .block-container { padding-top: 1.5rem; padding-bottom: 2rem; max-width: 1440px; }
+
+    /* ── Sidebar ── */
+    section[data-testid="stSidebar"] { background: #0d1117 !important; border-right: 1px solid #1e293b; }
+    section[data-testid="stSidebar"] .stMarkdown p,
+    section[data-testid="stSidebar"] label { color: #94a3b8 !important; }
+    section[data-testid="stSidebar"] h1, section[data-testid="stSidebar"] h2 { color: #f1f5f9 !important; }
+
+    /* ── Tabs ── */
+    .stTabs [data-baseweb="tab-list"] {
+        background: #111827; border-radius: 10px; padding: 4px; gap: 2px; border: 1px solid #1e293b;
+    }
+    .stTabs [data-baseweb="tab"] {
+        background: transparent; border-radius: 8px; color: #64748b;
+        font-weight: 500; font-size: 13px; padding: 8px 14px; transition: all 0.2s;
+    }
+    .stTabs [aria-selected="true"] {
+        background: #1e293b !important; color: #f59e0b !important; font-weight: 700;
+    }
+    .stTabs [data-baseweb="tab-panel"] { padding-top: 1.5rem; }
+
+    /* ── Metrics ── */
+    [data-testid="stMetric"] {
+        background: #111827; border: 1px solid #1e293b; border-radius: 12px; padding: 16px 20px;
+    }
+    [data-testid="stMetricLabel"] { color: #64748b !important; font-size: 11px !important; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; }
+    [data-testid="stMetricValue"] { color: #f1f5f9 !important; font-size: 22px !important; font-weight: 800; }
+
+    /* ── Buttons ── */
+    .stButton > button {
+        background: linear-gradient(135deg, #f59e0b, #d97706);
+        color: #0a0e1a; font-weight: 800; border: none; border-radius: 8px;
+        padding: 10px 20px; letter-spacing: 0.03em; transition: all 0.2s;
+    }
+    .stButton > button:hover {
+        background: linear-gradient(135deg, #fbbf24, #f59e0b);
+        box-shadow: 0 4px 16px rgba(245,158,11,0.35); transform: translateY(-1px);
+    }
+
+    /* ── Inputs ── */
+    .stSelectbox > div > div,
+    .stNumberInput > div > div > input,
+    .stTextArea > div > div > textarea,
+    .stTextInput > div > div > input {
+        background: #1e293b !important; border-color: #334155 !important;
+        color: #f1f5f9 !important; border-radius: 8px !important;
+    }
+
+    /* ── Forms ── */
+    .stForm { background: #111827; border: 1px solid #1e293b; border-radius: 12px; padding: 20px; }
+
+    /* ── Expanders ── */
+    .streamlit-expanderHeader {
+        background: #111827 !important; border: 1px solid #1e293b !important;
+        border-radius: 8px !important; color: #94a3b8 !important; font-weight: 500;
+    }
+    .streamlit-expanderContent {
+        background: #0d1117 !important; border: 1px solid #1e293b !important;
+        border-top: none !important; border-radius: 0 0 8px 8px !important;
+    }
+
+    /* ── Typography ── */
+    h1, h2, h3 { color: #f1f5f9 !important; font-weight: 800 !important; }
+    p, .stMarkdown p { color: #94a3b8; }
+    hr { border-color: #1e293b !important; margin: 1.5rem 0; }
+    .stCaption, small { color: #475569 !important; font-size: 12px; }
+
+    /* ── Radio ── */
+    .stRadio > div { gap: 8px; }
+    .stRadio label {
+        background: #111827; border: 1px solid #1e293b; border-radius: 8px;
+        padding: 8px 18px; color: #94a3b8 !important; cursor: pointer; transition: all 0.2s;
+    }
+
+    /* ── Alerts ── */
+    .stSuccess { background: #052e16 !important; border-color: #10b981 !important; border-radius: 8px !important; }
+    .stWarning { background: #1c1207 !important; border-color: #f59e0b !important; border-radius: 8px !important; }
+    .stInfo    { background: #0c1a2e !important; border-color: #3b82f6 !important; border-radius: 8px !important; }
+    .stError   { background: #1f0707 !important; border-color: #ef4444 !important; border-radius: 8px !important; }
+
+    /* ── DataFrames ── */
+    .stDataFrame { border: 1px solid #1e293b !important; border-radius: 10px !important; overflow: hidden; }
+
+    /* ── Scrollbar ── */
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    ::-webkit-scrollbar-track { background: #0a0e1a; }
+    ::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 3px; }
+    </style>
+    """, unsafe_allow_html=True)
+
 
 def _short(team: str) -> str:
     shorts = {
@@ -79,9 +176,13 @@ def _short(team: str) -> str:
 # ── Sidebar ───────────────────────────────────────────────────────────
 
 def render_sidebar():
-    st.sidebar.image("https://upload.wikimedia.org/wikipedia/commons/thumb/a/a6/Major_League_Baseball_logo.svg/320px-Major_League_Baseball_logo.svg.png",
-                     width=120)
-    st.sidebar.title("⚾ MLB Model v4.0")
+    st.sidebar.markdown("""
+    <div style="text-align:center;padding:16px 0 8px">
+        <div style="font-size:36px">⚾</div>
+        <div style="color:#f59e0b;font-size:18px;font-weight:800;letter-spacing:0.05em">MLB MODEL</div>
+        <div style="color:#475569;font-size:11px;letter-spacing:0.1em">v4.0 · 12-LAYER AI</div>
+    </div>
+    """, unsafe_allow_html=True)
     st.sidebar.markdown("---")
 
     date_input = st.sidebar.date_input(
@@ -92,23 +193,42 @@ def render_sidebar():
     )
     date_str = date_input.strftime("%Y-%m-%d")
 
-    run_btn = st.sidebar.button("🔄 Run Model", type="primary", use_container_width=True)
+    run_btn = st.sidebar.button("⚡ Run Model", type="primary", use_container_width=True)
 
     st.sidebar.markdown("---")
-    st.sidebar.markdown("**Hard Rules Active**")
-    st.sidebar.markdown(
-        "✅ Totals included when 3+ signals\n\n"
-        "❌ No Sweep G3 in parlays\n\n"
-        "❌ No debut K props\n\n"
-        "❌ Max 3 picks/team/7 days"
-    )
+    st.sidebar.markdown("""
+    <div style="color:#475569;font-size:11px;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:8px">Active Rules</div>
+    """, unsafe_allow_html=True)
+    rules = [
+        ("✅", "Totals allowed · 3+ signals"),
+        ("✅", "All DK markets active"),
+        ("🚫", "No debut K props"),
+        ("🚫", "Max 3 picks · team · 7d"),
+    ]
+    for icon, text in rules:
+        st.sidebar.markdown(f"""
+        <div style="display:flex;align-items:center;gap:8px;padding:4px 0;color:#94a3b8;font-size:12px">
+            <span>{icon}</span><span>{text}</span>
+        </div>""", unsafe_allow_html=True)
+
     st.sidebar.markdown("---")
-    st.sidebar.markdown(
-        "**Unit size:** $5  \n"
-        "🔥 STRONG = 3u/$15  \n"
-        "✅ MEDIUM = 2u/$10  \n"
-        "📌 LEAN = 1u/$5"
-    )
+    st.sidebar.markdown("""
+    <div style="color:#475569;font-size:11px;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:8px">Unit Sizing · $5/unit</div>
+    <div style="display:grid;gap:6px">
+        <div style="background:#111827;border:1px solid #1e293b;border-radius:8px;padding:8px 12px;display:flex;justify-content:space-between">
+            <span style="color:#ef4444;font-size:13px">🔥 STRONG</span>
+            <span style="color:#f1f5f9;font-size:13px;font-weight:700">3u · $15</span>
+        </div>
+        <div style="background:#111827;border:1px solid #1e293b;border-radius:8px;padding:8px 12px;display:flex;justify-content:space-between">
+            <span style="color:#f59e0b;font-size:13px">✅ MEDIUM</span>
+            <span style="color:#f1f5f9;font-size:13px;font-weight:700">2u · $10</span>
+        </div>
+        <div style="background:#111827;border:1px solid #1e293b;border-radius:8px;padding:8px 12px;display:flex;justify-content:space-between">
+            <span style="color:#94a3b8;font-size:13px">📌 LEAN</span>
+            <span style="color:#f1f5f9;font-size:13px;font-weight:700">1u · $5</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
     return date_str, run_btn
 
@@ -116,161 +236,242 @@ def render_sidebar():
 # ── Main content ──────────────────────────────────────────────────────
 
 def render_header(roi: dict):
-    col1, col2, col3, col4, col5 = st.columns(5)
-    with col1:
-        st.metric("Today", datetime.now().strftime("%b %d, %Y"))
-    with col2:
-        bets = roi.get("total_bets", 0)
-        st.metric("Total Bets", bets)
-    with col3:
-        wins = roi.get("wins", 0)
-        losses = roi.get("losses", 0)
-        st.metric("Record", f"{wins}-{losses}")
-    with col4:
-        hit = roi.get("hit_rate", 0)
-        st.metric("Hit Rate", f"{hit:.1%}")
-    with col5:
-        r = roi.get("roi", 0)
-        delta_color = "normal" if r >= 0 else "inverse"
-        st.metric("ROI", f"{r:+.2f}%", delta=f"{r:+.2f}%", delta_color=delta_color)
+    wins   = roi.get("wins", 0)
+    losses = roi.get("losses", 0)
+    bets   = roi.get("total_bets", 0)
+    hit    = roi.get("hit_rate", 0)
+    r      = roi.get("roi", 0)
+    roi_color = "#10b981" if r >= 0 else "#ef4444"
+
+    st.markdown(f"""
+    <div style="background:linear-gradient(135deg,#111827,#0d1117);
+                border:1px solid #1e293b;border-radius:16px;
+                padding:24px 32px;margin-bottom:24px">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:16px">
+            <div>
+                <div style="color:#475569;font-size:11px;text-transform:uppercase;letter-spacing:0.1em">Season Record</div>
+                <div style="color:#f1f5f9;font-size:32px;font-weight:800;line-height:1">{wins}–{losses}</div>
+                <div style="color:#475569;font-size:12px;margin-top:2px">{bets} graded bets</div>
+            </div>
+            <div style="text-align:center">
+                <div style="color:#475569;font-size:11px;text-transform:uppercase;letter-spacing:0.1em">Hit Rate</div>
+                <div style="color:#f59e0b;font-size:32px;font-weight:800;line-height:1">{hit:.1%}</div>
+            </div>
+            <div style="text-align:center">
+                <div style="color:#475569;font-size:11px;text-transform:uppercase;letter-spacing:0.1em">ROI</div>
+                <div style="color:{roi_color};font-size:32px;font-weight:800;line-height:1">{r:+.1f}%</div>
+            </div>
+            <div style="text-align:right">
+                <div style="color:#475569;font-size:11px;text-transform:uppercase;letter-spacing:0.1em">Model</div>
+                <div style="color:#f1f5f9;font-size:14px;font-weight:700">12-Layer AI</div>
+                <div style="color:#475569;font-size:12px">{datetime.now().strftime("%b %d, %Y")}</div>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
 
 def render_picks_tab(picks: list):
     active = [p for p in picks if p.tier != "SKIP"]
 
     if not active:
-        st.warning("⚠️ No picks today — pitchers may be TBD or no edge found. Try again after noon ET.")
+        st.markdown("""
+        <div style="background:#111827;border:1px solid #1e293b;border-radius:12px;
+                    padding:40px;text-align:center">
+            <div style="font-size:48px;margin-bottom:12px">⏳</div>
+            <div style="color:#f1f5f9;font-size:18px;font-weight:600">No picks today</div>
+            <div style="color:#475569;font-size:14px;margin-top:8px">Pitchers may be TBD or no statistical edge found. Try again after noon ET.</div>
+        </div>
+        """, unsafe_allow_html=True)
         return
 
     # POTD banner
     potd = next((p for p in active if p.tier == "STRONG"), active[0])
     units = UNIT_MAP.get(potd.tier, 1)
+    mkt = potd.recommended_market or potd.proposed_market or "ML"
+    factors_html = "  ·  ".join(potd.factors[:3])
+
+    tier_badge_color = {"STRONG": "#ef4444", "MEDIUM": "#f59e0b", "LEAN": "#94a3b8"}.get(potd.tier, "#94a3b8")
+
     st.markdown(f"""
-    <div style="background:linear-gradient(135deg,#1A1D26,#0E1117);
-                border:2px solid #FFD700;border-radius:12px;padding:20px;margin-bottom:20px">
-        <h2 style="color:#FFD700;margin:0">⭐ Pick of the Day</h2>
-        <h3 style="color:#FAFAFA;margin:8px 0">
-            {_short(potd.away_team)} @ {_short(potd.home_team)}
-        </h3>
-        <p style="color:#00D4AA;font-size:22px;font-weight:bold;margin:4px 0">
-            BET: {_short(potd.backing_team)} &nbsp;({potd.recommended_market or potd.proposed_market})
-        </p>
-        <p style="color:#FFD700;font-size:16px;margin:4px 0">
-            {potd.tier} — {units}u / ${units * UNIT_SIZE} &nbsp;|&nbsp;
-            Lose probability: {potd.losing_pct:.0%}
-        </p>
-        <p style="color:#AAA;font-size:13px;margin:4px 0">
-            {" &nbsp;·&nbsp; ".join(potd.factors[:4])}
-        </p>
+    <div style="background:linear-gradient(135deg,#111827 0%,#1a1208 100%);
+                border:1px solid #f59e0b44;border-radius:16px;
+                padding:28px 32px;margin-bottom:24px;position:relative;overflow:hidden">
+        <div style="position:absolute;top:0;right:0;width:200px;height:200px;
+                    background:radial-gradient(circle,#f59e0b08,transparent);
+                    border-radius:50%;transform:translate(30%,-30%)"></div>
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap">
+            <div>
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+                    <span style="font-size:20px">⭐</span>
+                    <span style="color:#f59e0b;font-size:11px;text-transform:uppercase;
+                                 letter-spacing:0.12em;font-weight:700">Pick of the Day</span>
+                    <span style="background:{tier_badge_color}22;color:{tier_badge_color};
+                                 font-size:11px;font-weight:700;padding:2px 10px;
+                                 border-radius:999px;letter-spacing:0.05em">{potd.tier}</span>
+                </div>
+                <div style="color:#f1f5f9;font-size:22px;font-weight:800;margin-bottom:6px">
+                    {_short(potd.away_team)} <span style="color:#475569;font-weight:400">@</span> {_short(potd.home_team)}
+                </div>
+                <div style="color:#10b981;font-size:28px;font-weight:800;margin-bottom:8px">
+                    BET: {_short(potd.backing_team)}
+                    <span style="color:#475569;font-size:16px;font-weight:500"> · {mkt}</span>
+                </div>
+                <div style="color:#475569;font-size:12px">{factors_html}</div>
+            </div>
+            <div style="text-align:right">
+                <div style="color:#f59e0b;font-size:36px;font-weight:800">{units}u</div>
+                <div style="color:#475569;font-size:14px">${units * UNIT_SIZE} stake</div>
+                <div style="color:#475569;font-size:12px;margin-top:4px">Lose prob: {potd.losing_pct:.0%}</div>
+            </div>
+        </div>
     </div>
     """, unsafe_allow_html=True)
 
-    # Picks table
-    rows = []
-    for i, p in enumerate(active, 1):
+    # Picks cards
+    tier_colors = {"STRONG": "#ef4444", "MEDIUM": "#f59e0b", "LEAN": "#94a3b8"}
+    for p in active:
         u = UNIT_MAP.get(p.tier, 1)
-        rows.append({
-            "":         TIER_EMOJI.get(p.tier, "•"),
-            "Game":     f"{_short(p.away_team)} @ {_short(p.home_team)}",
-            "BET THIS": f"➜ {_short(p.backing_team)}",
-            "Market":   p.recommended_market or p.proposed_market or "ML",
-            "Tier":     p.tier,
-            "Bet":      f"{u}u / ${u * UNIT_SIZE}",
-            "Factors":  p.factor_count,
-            "Lose %":   f"{p.losing_pct:.0%}",
-            "Top Edge": (p.factors[0][:55] if p.factors else "—"),
-        })
+        mkt = p.recommended_market or p.proposed_market or "ML"
+        tc = tier_colors.get(p.tier, "#94a3b8")
+        factors_str = "  ·  ".join(p.factors[:3]) if p.factors else "—"
 
-    df = pd.DataFrame(rows)
-    st.dataframe(
-        df,
-        hide_index=True,
-        use_container_width=True,
-        column_config={
-            "":          st.column_config.TextColumn("", width=30),
-            "BET THIS":  st.column_config.TextColumn("BET THIS", width=110),
-            "Tier":      st.column_config.TextColumn("Tier", width=80),
-            "Bet":       st.column_config.TextColumn("Bet", width=90),
-            "Factors":   st.column_config.NumberColumn("✓", width=50),
-            "Lose %":    st.column_config.TextColumn("Lose %", width=70),
-        }
-    )
+        # Get additional markets from layer 8
+        add_markets = []
+        for lo in (p.layer_outputs or []):
+            if lo.layer == 8:
+                add_markets = lo.data.get("additional_markets", [])
+                break
+        also_str = "  ·  ".join(add_markets[:3]) if add_markets else ""
 
-    # Losing scenarios expander
-    with st.expander("📋 Losing Scenarios"):
+        st.markdown(f"""
+        <div style="background:#111827;border:1px solid #1e293b;border-left:3px solid {tc};
+                    border-radius:12px;padding:20px 24px;margin-bottom:12px">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px">
+                <div style="flex:1;min-width:200px">
+                    <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+                        <span style="background:{tc}22;color:{tc};font-size:11px;font-weight:700;
+                                     padding:2px 10px;border-radius:999px">{p.tier}</span>
+                        <span style="color:#f59e0b;font-size:12px">✓ {p.factor_count} factors</span>
+                    </div>
+                    <div style="color:#f1f5f9;font-size:16px;font-weight:700">
+                        {_short(p.away_team)} <span style="color:#475569">@</span> {_short(p.home_team)}
+                    </div>
+                    <div style="color:#10b981;font-size:13px;font-weight:600;margin-top:2px">
+                        ➜ {_short(p.backing_team)} · {mkt}
+                    </div>
+                    {f'<div style="color:#475569;font-size:11px;margin-top:4px">Also: {also_str}</div>' if also_str else ''}
+                    <div style="color:#475569;font-size:11px;margin-top:6px">{factors_str}</div>
+                </div>
+                <div style="text-align:right">
+                    <div style="color:#f59e0b;font-size:22px;font-weight:800">{u}u</div>
+                    <div style="color:#94a3b8;font-size:12px">${u * UNIT_SIZE}</div>
+                    <div style="color:#475569;font-size:11px;margin-top:4px">Lose: {p.losing_pct:.0%}</div>
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with st.expander("📋 Losing Scenarios & Full Analysis"):
         for p in active:
             u = UNIT_MAP.get(p.tier, 1)
-            st.markdown(
-                f"**{_short(p.away_team)} @ {_short(p.home_team)}** "
-                f"({p.tier}, {u}u)  \n"
-                f"_{p.losing_scenario}_"
-            )
+            st.markdown(f"**{_short(p.away_team)} @ {_short(p.home_team)}** ({p.tier}, {u}u)  \n_{p.losing_scenario}_")
 
 
 def render_parlays_tab(parlays: list, nrfi_parlay: dict | None):
-    st.markdown("### 🎰 Daily Parlay Card")
-    st.caption("All 5 parlays generated daily. ⭐ = model's highest-confidence selection. ⚠️ = below optimal EV threshold but best available legs.")
+    st.markdown("""
+    <div style="margin-bottom:20px">
+        <div style="color:#f1f5f9;font-size:20px;font-weight:800">🎰 Daily Parlay Card</div>
+        <div style="color:#475569;font-size:12px;margin-top:2px">5 parlays built daily · ⭐ high confidence · ⚠️ best available</div>
+    </div>
+    """, unsafe_allow_html=True)
 
     if not parlays:
         st.info("No picks available to build parlays — run the model first.")
         return
 
     parlay_meta = [
-        ("P1 — Anchor 2-Leg",  "🥇", "$35–$40"),
-        ("P2 — Core 3-Leg",    "🥈", "$15–$20"),
-        ("P3 — Science 4-Leg", "🥉", "$10–$15"),
-        ("P4 — Push 5-Leg",    "🎯", "$5–$10"),
-        ("P5 — Moonshot 6-Leg","🌙", "$5"),
+        ("P1 — Anchor",   "🥇", "$35–$40", "#f59e0b"),
+        ("P2 — Core",     "🥈", "$15–$20", "#94a3b8"),
+        ("P3 — Science",  "🥉", "$10–$15", "#cd7c3a"),
+        ("P4 — Push",     "🎯", "$5–$10",  "#3b82f6"),
+        ("P5 — Moonshot", "🌙", "$5",      "#8b5cf6"),
     ]
 
     for i, parlay in enumerate(parlays):
         parlay.compute()
-        label, icon, stake = parlay_meta[i] if i < len(parlay_meta) else (f"Parlay {i+1}", "🎰", "$5")
+        label, icon, stake, accent = parlay_meta[i] if i < len(parlay_meta) else (f"Parlay {i+1}", "🎰", "$5", "#64748b")
+        star   = "⭐ " if parlay.ev_pct >= 0.10 and not parlay.below_threshold else ""
+        warn   = "⚠️ best-available legs" if parlay.below_threshold else ""
+        ev_col = "#10b981" if parlay.ev_pct >= 0 else "#ef4444"
+        legs_n = len(parlay.legs)
 
-        # Star if EV is solidly positive, warn if forced below threshold
-        star = "⭐ " if parlay.ev_pct >= 0.10 and not parlay.below_threshold else ""
-        warn = " ⚠️ Below EV Threshold — best available legs" if parlay.below_threshold else ""
+        st.markdown(f"""
+        <div style="background:#111827;border:1px solid #1e293b;border-top:2px solid {accent};
+                    border-radius:12px;padding:20px 24px;margin-bottom:14px">
+            <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:14px">
+                <div style="display:flex;align-items:center;gap:10px">
+                    <span style="font-size:18px">{icon}</span>
+                    <span style="color:#f1f5f9;font-size:15px;font-weight:700">{star}{label}</span>
+                    <span style="color:#475569;font-size:12px">{legs_n}-leg{' · ' + warn if warn else ''}</span>
+                </div>
+                <div style="display:flex;gap:24px">
+                    <div style="text-align:center">
+                        <div style="color:#475569;font-size:10px;text-transform:uppercase;letter-spacing:0.08em">Odds</div>
+                        <div style="color:#f59e0b;font-size:18px;font-weight:800">+{parlay.american_odds:,}</div>
+                    </div>
+                    <div style="text-align:center">
+                        <div style="color:#475569;font-size:10px;text-transform:uppercase;letter-spacing:0.08em">Stake</div>
+                        <div style="color:#f1f5f9;font-size:15px;font-weight:600">{stake}</div>
+                    </div>
+                    <div style="text-align:center">
+                        <div style="color:#475569;font-size:10px;text-transform:uppercase;letter-spacing:0.08em">Win</div>
+                        <div style="color:#10b981;font-size:15px;font-weight:600">~${parlay.payout_per_unit:.0f}</div>
+                    </div>
+                    <div style="text-align:center">
+                        <div style="color:#475569;font-size:10px;text-transform:uppercase;letter-spacing:0.08em">EV</div>
+                        <div style="color:{ev_col};font-size:15px;font-weight:600">{parlay.ev_pct:+.1%}</div>
+                    </div>
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
 
-        with st.container():
-            st.markdown(f"### {icon} {star}{label}{warn}")
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Odds",  f"+{parlay.american_odds:,}")
-            col2.metric("Stake", stake)
-            col3.metric("Win",   f"~${parlay.payout_per_unit:.0f}")
-            ev_color = "normal" if parlay.ev_pct >= 0 else "inverse"
-            col4.metric("EV", f"{parlay.ev_pct:+.1%}", delta_color=ev_color)
+        leg_rows = []
+        for j, leg in enumerate(parlay.legs, 1):
+            leg_rows.append({
+                "#":       j,
+                "BET":     f"➜ {_short(leg.pick.backing_team)}",
+                "Game":    f"{_short(leg.pick.away_team)} @ {_short(leg.pick.home_team)}",
+                "Market":  leg.market[:22],
+                "Price":   f"{leg.price:+d}",
+                "Win %":   f"{leg.true_prob:.0%}",
+                "Lose %":  f"{leg.lose_pct:.0%}",
+            })
+        st.dataframe(pd.DataFrame(leg_rows), hide_index=True, use_container_width=True)
 
-            leg_rows = []
-            for j, leg in enumerate(parlay.legs, 1):
-                leg_rows.append({
-                    "Leg":      j,
-                    "BET":      f"➜ {_short(leg.pick.backing_team)}",
-                    "Game":     f"{_short(leg.pick.away_team)} @ {_short(leg.pick.home_team)}",
-                    "Market":   leg.market[:20],
-                    "Price":    f"{leg.price:+d}",
-                    "Win Prob": f"{leg.true_prob:.0%}",
-                })
-            st.dataframe(pd.DataFrame(leg_rows), hide_index=True, use_container_width=True)
+        note = parlay.independence_notes[0] if parlay.independence_notes else ""
+        nc = "#10b981" if "PASS" in note else "#f59e0b"
+        st.markdown(f'<div style="color:{nc};font-size:11px;margin-top:6px">{note}</div></div>', unsafe_allow_html=True)
 
-            note = parlay.independence_notes[0] if parlay.independence_notes else ""
-            color = "green" if "PASS" in note else "orange"
-            st.markdown(f":{color}[{note}]")
-            st.markdown("---")
-
-    # NRFI parlay bonus
     if nrfi_parlay and isinstance(nrfi_parlay, dict):
-        st.markdown("### 🚫 NRFI Bonus Parlay")
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Type",  nrfi_parlay.get("type", ""))
-        col2.metric("Odds",  nrfi_parlay.get("american_odds", ""))
-        col3.metric("Stake", nrfi_parlay.get("recommended_stake", ""))
-        col4.metric("Win",   f"~${nrfi_parlay.get('potential_win', 0):.0f}")
+        am = nrfi_parlay.get("american_odds", "")
+        pw = nrfi_parlay.get("potential_win", 0)
+        st.markdown(f"""
+        <div style="background:linear-gradient(135deg,#0a1f0e,#111827);border:1px solid #10b98133;
+                    border-radius:12px;padding:20px 24px;margin-top:8px">
+            <div style="color:#10b981;font-size:11px;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:10px">🚫 NRFI Bonus Parlay</div>
+            <div style="display:flex;gap:28px;flex-wrap:wrap;margin-bottom:12px">
+                <div><div style="color:#475569;font-size:10px">TYPE</div><div style="color:#f1f5f9;font-weight:700">{nrfi_parlay.get("type","")}</div></div>
+                <div><div style="color:#475569;font-size:10px">ODDS</div><div style="color:#f59e0b;font-weight:700">{am}</div></div>
+                <div><div style="color:#475569;font-size:10px">STAKE</div><div style="color:#f1f5f9;font-weight:700">{nrfi_parlay.get("recommended_stake","")}</div></div>
+                <div><div style="color:#475569;font-size:10px">WIN</div><div style="color:#10b981;font-weight:700">~${pw:.0f}</div></div>
+            </div>
+        """, unsafe_allow_html=True)
         legs = nrfi_parlay.get("legs", [])
         if legs:
-            rows = [{"Game": g.get("game","?"),
-                     "NRFI %": f"{g.get('nrfi_probability',0):.1%}",
-                     "Tier": g.get("tier","?")} for g in legs]
+            rows = [{"Game": g.get("game","?"), "NRFI %": f"{g.get('nrfi_probability',0):.1%}", "Tier": g.get("tier","?")} for g in legs]
             st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
 
 
 def render_nrfi_tab(nrfi_ranked: list, nrfi_parlay: dict | None = None):
@@ -981,39 +1182,114 @@ def render_record_bet_tab(picks: list = None, parlays: list = None, nrfi_ranked:
                 if parlay_label:
                     st.caption(f"Label: {parlay_label}")
 
-    # ── Recent bets history ────────────────────────────────────────────
+    # ── Recent bets history (grouped parlays) ─────────────────────────
     st.markdown("---")
-    st.markdown("#### 📋 Recent Recorded Bets")
+    st.markdown("""
+    <div style="color:#f1f5f9;font-size:15px;font-weight:700;margin-bottom:12px">📋 Recent Bet History</div>
+    """, unsafe_allow_html=True)
     try:
         from sports_betting.database import get_db
+        import json as _json
         with get_db() as conn:
             rows = conn.execute("""
-                SELECT game_id, market, side, book_price, recommended_bet, result, detected_at
+                SELECT game_id, market, side, book_price, recommended_bet, result, detected_at, factors
                 FROM value_bets
                 WHERE confidence = 'PLACED'
                 ORDER BY detected_at DESC
-                LIMIT 15
+                LIMIT 40
             """).fetchall()
-        if rows:
-            hist = []
-            for r in rows:
-                result_str = r[5] or "Pending"
-                icon = "🟢" if result_str == "WIN" else "🔴" if result_str == "LOSS" else "⏳"
-                units_val = round((r[4] or 0) / UNIT_SIZE, 1)
-                hist.append({
-                    "":       icon,
-                    "Game":   str(r[0])[:28],
-                    "Market": r[1] or "?",
-                    "Side":   str(r[2]).upper() if r[2] else "?",
-                    "Price":  f"{int(r[3]):+d}" if r[3] else "?",
-                    "Units":  units_val,
-                    "Stake":  f"${r[4]:.2f}" if r[4] else "?",
-                    "Result": result_str,
-                    "Date":   str(r[6])[:10] if r[6] else "?",
-                })
-            st.dataframe(pd.DataFrame(hist), hide_index=True, use_container_width=True)
+
+        if not rows:
+            st.markdown('<div style="color:#475569;font-size:13px;padding:16px 0">No bets recorded yet — submit a bet above to start tracking.</div>', unsafe_allow_html=True)
         else:
-            st.caption("No bets recorded yet — your history appears here once you submit a bet above.")
+            # Parse parlay_id from factors JSON to group legs
+            def _parse_parlay_id(factors_str):
+                try:
+                    fs = _json.loads(factors_str or "[]")
+                    for f in fs:
+                        if str(f).startswith("parlay:"):
+                            return str(f).replace("parlay:", "")
+                except Exception:
+                    pass
+                return None
+
+            # Group rows: singles stay flat, parlay legs grouped by parlay_id
+            groups = {}   # parlay_id → list of rows
+            singles = []
+            for r in rows:
+                pid = _parse_parlay_id(r[7])
+                if pid:
+                    groups.setdefault(pid, []).append(r)
+                else:
+                    singles.append(r)
+
+            def _result_badge(res):
+                if res == "WIN":   return "🟢", "#10b981"
+                if res == "LOSS":  return "🔴", "#ef4444"
+                return "⏳", "#94a3b8"
+
+            # Render parlay groups first (most recent first by first leg date)
+            for pid, legs in groups.items():
+                leg_count = len(legs)
+                date_str_h = str(legs[0][6])[:10] if legs[0][6] else "?"
+                results = [r[5] for r in legs]
+                if all(r == "WIN" for r in results):
+                    group_icon, group_color = "🟢", "#10b981"
+                elif any(r == "LOSS" for r in results):
+                    group_icon, group_color = "🔴", "#ef4444"
+                else:
+                    group_icon, group_color = "⏳", "#94a3b8"
+
+                st.markdown(f"""
+                <div style="background:#111827;border:1px solid #1e293b;border-left:3px solid #8b5cf6;
+                            border-radius:10px;padding:14px 18px;margin-bottom:10px">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+                        <div style="display:flex;align-items:center;gap:8px">
+                            <span style="font-size:16px">{group_icon}</span>
+                            <span style="color:#8b5cf6;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em">🎰 {leg_count}-Leg Parlay</span>
+                            <span style="color:#475569;font-size:11px">{date_str_h}</span>
+                        </div>
+                        <span style="color:{group_color};font-size:12px;font-weight:600">{'All Win' if group_icon=='🟢' else 'Loss' if group_icon=='🔴' else 'Pending'}</span>
+                    </div>
+                """, unsafe_allow_html=True)
+
+                for leg_row in legs:
+                    r_icon, r_color = _result_badge(leg_row[5])
+                    side = str(leg_row[2]).upper()[:12] if leg_row[2] else "?"
+                    mkt  = str(leg_row[1])[:18] if leg_row[1] else "?"
+                    price = f"{int(leg_row[3]):+d}" if leg_row[3] else "?"
+                    st.markdown(f"""
+                    <div style="display:flex;align-items:center;gap:10px;padding:5px 0;
+                                border-top:1px solid #1e293b">
+                        <span style="font-size:13px">{r_icon}</span>
+                        <span style="color:#f1f5f9;font-size:13px;font-weight:600;min-width:80px">{side}</span>
+                        <span style="color:#64748b;font-size:12px;min-width:100px">{mkt}</span>
+                        <span style="color:#f59e0b;font-size:12px">{price}</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+                st.markdown("</div>", unsafe_allow_html=True)
+
+            # Render single bets
+            for r in singles:
+                r_icon, r_color = _result_badge(r[5])
+                side   = str(r[2]).upper()[:16] if r[2] else "?"
+                mkt    = str(r[1])[:20] if r[1] else "?"
+                price  = f"{int(r[3]):+d}" if r[3] else "?"
+                stake  = f"${r[4]:.2f}" if r[4] else "?"
+                date_h = str(r[6])[:10] if r[6] else "?"
+                st.markdown(f"""
+                <div style="background:#111827;border:1px solid #1e293b;border-left:3px solid #3b82f6;
+                            border-radius:10px;padding:12px 18px;margin-bottom:8px;
+                            display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+                    <span style="font-size:16px">{r_icon}</span>
+                    <span style="color:#f1f5f9;font-size:14px;font-weight:700;min-width:80px">{side}</span>
+                    <span style="color:#64748b;font-size:13px;min-width:110px">{mkt}</span>
+                    <span style="color:#f59e0b;font-size:13px;min-width:55px">{price}</span>
+                    <span style="color:#94a3b8;font-size:12px">{stake}</span>
+                    <span style="color:{r_color};font-size:12px;font-weight:600;margin-left:auto">{r[5] or 'Pending'}</span>
+                    <span style="color:#334155;font-size:11px">{date_h}</span>
+                </div>
+                """, unsafe_allow_html=True)
     except Exception as e:
         st.caption(f"Bet history unavailable: {e}")
 
@@ -1021,23 +1297,28 @@ def render_record_bet_tab(picks: list = None, parlays: list = None, nrfi_ranked:
 # ── App entry point ───────────────────────────────────────────────────
 
 def main():
+    inject_css()
     get_db_connection()
 
     date_str, run_btn = render_sidebar()
 
-    st.title("⚾ MLB Betting Model v4.0")
-    st.caption(f"12-Layer Framework  ·  Built from 24 days live data  ·  Platform: DraftKings  ·  Unit: $5")
+    st.markdown("""
+    <div style="margin-bottom:4px">
+        <span style="color:#f59e0b;font-size:12px;text-transform:uppercase;letter-spacing:0.14em;font-weight:700">⚾ MLB Betting Model</span>
+        <span style="color:#1e293b"> · </span>
+        <span style="color:#334155;font-size:12px">v4.0 · 12-Layer Statistical Framework · DraftKings</span>
+    </div>
+    """, unsafe_allow_html=True)
 
     # ROI header
     roi = cached_roi()
     render_header(roi)
-    st.markdown("---")
 
     # Run model
     if run_btn:
         st.cache_data.clear()
 
-    with st.spinner("Running 12-layer analysis... (~30 seconds)"):
+    with st.spinner("⚡ Running 12-layer analysis..."):
         try:
             results = cached_run_model(date_str)
         except Exception as e:
@@ -1047,6 +1328,17 @@ def main():
 
     picks        = results.get("picks", [])
     parlays      = results.get("parlays", [])
+
+    # Auto-track all model picks + parlay legs in DB for self-improvement
+    try:
+        from sports_betting.analysis.signal_tracker import auto_record_model_picks
+        auto_record_model_picks(
+            [p for p in picks if getattr(p, "tier", "SKIP") != "SKIP"],
+            parlays,
+            date_str,
+        )
+    except Exception:
+        pass
     nrfi_parlay  = results.get("nrfi_parlay")
     nrfi_ranked  = results.get("nrfi_ranked", [])
     skipped      = results.get("skipped", [])
