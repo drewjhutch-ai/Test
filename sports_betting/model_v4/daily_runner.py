@@ -20,8 +20,12 @@ from ..collectors.mlb_collector import (
 from ..collectors.odds_collector import get_live_odds, parse_and_store_odds
 from ..collectors.weather_collector import get_game_weather
 from ..collectors.sharp_money import detect_wiseguy_moves
+from ..collectors.fangraphs_collector import (
+    get_pitcher_stats_fangraphs, get_statcast_pitcher_metrics, enrich_pitcher_profile
+)
 from ..database import init_db, upsert_game
 from ..models.trainer import update_bet_results, compute_roi_summary
+from ..analysis.signal_tracker import update_signal_performance
 
 from .pitcher_lists import is_on_fade_list, is_on_backs_list, is_era_fraud
 from .hard_rules import run_all_hard_rules_for_card, check_seven_day_cap
@@ -63,7 +67,7 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
     # ------------------------------------------------------------------ #
     # PHASE 1 — Data pull                                                 #
     # ------------------------------------------------------------------ #
-    logger.info("Phase 1: Pulling schedule, odds, weather...")
+    logger.info("Phase 1: Pulling schedule, odds, weather, FanGraphs, Statcast...")
     games = get_todays_games()
     for g in games:
         upsert_game(g)
@@ -74,6 +78,14 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
     team_id_map = get_team_id_map()
     standings = get_team_standings()
     standings_by_name = {s["team_name"]: s for s in standings}
+
+    # Upgrade 1 — FanGraphs live pitcher stats
+    logger.info("Fetching FanGraphs pitcher stats...")
+    fg_stats = get_pitcher_stats_fangraphs()
+
+    # Upgrade 2 — Baseball Savant Statcast metrics
+    logger.info("Fetching Statcast pitcher metrics...")
+    sc_stats = get_statcast_pitcher_metrics()
 
     # ------------------------------------------------------------------ #
     # LAYERS 1-12 — Full analysis per game                               #
@@ -111,6 +123,10 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
         away_sp_name = game.get("away_probable_pitcher", "TBD")
         home_pitcher = _build_pitcher_profile(home_sp_name, home, team_id_map)
         away_pitcher = _build_pitcher_profile(away_sp_name, away, team_id_map)
+
+        # Upgrade 1+2 — enrich with real FanGraphs + Statcast data
+        enrich_pitcher_profile(home_pitcher, fg_stats, sc_stats)
+        enrich_pitcher_profile(away_pitcher, fg_stats, sc_stats)
 
         # Build team profiles
         home_stand = standings_by_name.get(home, {})
@@ -273,6 +289,9 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
 
     # Sharp money
     sharp_plays = detect_wiseguy_moves(parsed_games)
+
+    # Upgrade 3 — update signal weights from completed game feedback
+    update_signal_performance()
 
     # Render the card
     if verbose:
