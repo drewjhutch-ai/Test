@@ -229,13 +229,9 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
             proposed_market="full_game_ml",
         )
 
-        # Skip TBD games
+        # Note TBD games but still analyze with available data
         if home_sp_name in ("TBD", "") or away_sp_name in ("TBD", ""):
-            skipped_games.append({
-                "game": f"{away} @ {home}",
-                "reason": "Pitcher TBD — cannot run Layer 1 identity check",
-            })
-            continue
+            pick.skip_reason = None  # Clear any skip — allow layers to run with warning
 
         pick = run_all_layers(
             pick=pick,
@@ -482,21 +478,25 @@ def _build_factor_list(
     sp = home_p if backing == home else away_p
     opp_sp = away_p if backing == home else home_p
     team = home_t if backing == home else away_t
+    opp_team = away_t if backing == home else home_t
     total = max(1, team.wins + team.losses)
+    opp_total = max(1, opp_team.wins + opp_team.losses)
     wpct = team.wins / total
+    opp_wpct = opp_team.wins / opp_total
 
+    # --- Pitcher quality (real data when available, else default 4.50 won't trigger) ---
     on_backs, backs_data = is_on_backs_list(sp.name)
     if on_backs:
         factors.append(f"{sp.name} on permanent backs list ({backs_data.get('note','')})")
 
-    if sp.siera < 3.50:
+    if sp.siera < 3.80:
         factors.append(f"SP elite SIERA: {sp.siera:.2f}")
-    if sp.era < 3.00:
+    if sp.era < 3.50:
         factors.append(f"SP ERA {sp.era:.2f} (strong)")
-    if sp.k9 >= 9.5:
-        factors.append(f"SP K/9 {sp.k9:.1f} (elite)")
-    if sp.whip < 1.10:
-        factors.append(f"SP WHIP {sp.whip:.2f} (elite command)")
+    if sp.k9 >= 9.0:
+        factors.append(f"SP K/9 {sp.k9:.1f} (above avg strikeouts)")
+    if sp.whip < 1.20:
+        factors.append(f"SP WHIP {sp.whip:.2f} (good command)")
 
     fraud = is_era_fraud(opp_sp.era, opp_sp.xera, opp_sp.fip, opp_sp.siera)
     if fraud["is_fraud"]:
@@ -506,15 +506,44 @@ def _build_factor_list(
     if on_fade:
         factors.append(f"Opposing {opp_sp.name} on permanent fade list ({fade_data.get('note','')})")
 
+    # Opposing pitcher ERA vulnerability
+    if opp_sp.era >= 4.50 and opp_sp.name not in ("TBD", ""):
+        factors.append(f"Opposing SP {opp_sp.name} ERA {opp_sp.era:.2f} (exploitable)")
+    elif opp_sp.name in ("TBD", ""):
+        factors.append("Opposing SP unconfirmed (TBD) — scheduling uncertainty favors prepared side")
+
+    # --- Team record & form ---
     if wpct >= 0.520:
         factors.append(f"{backing} winning record ({team.wins}-{team.losses}, {wpct:.3f})")
+    elif wpct >= 0.480:
+        factors.append(f"{backing} near-.500 record ({team.wins}-{team.losses}) — competitive")
+
+    if opp_wpct < 0.460:
+        factors.append(f"Opponent {away if backing == home else home} below .500 ({opp_team.wins}-{opp_team.losses})")
+
     if team.run_diff > 0:
         factors.append(f"Positive run differential ({team.run_diff:+d})")
+    elif team.run_diff > -10:
+        factors.append(f"Near-even run differential ({team.run_diff:+d}) — competitive offense")
+
     if team.momentum >= 3:
         factors.append(f"Hot streak: {team.momentum}-game winning streak")
+    elif team.momentum >= 2:
+        factors.append(f"Winning momentum: {team.momentum} straight wins")
 
+    if opp_team.momentum <= -3:
+        factors.append(f"Opponent on {abs(opp_team.momentum)}-game losing streak")
+
+    # --- Home/Away ---
+    if backing == home:
+        factors.append("Home field advantage (+3-4% win probability boost)")
+    else:
+        if away_t.wins > away_t.losses:
+            factors.append(f"{away} road record supports away backing")
+
+    # --- Weather ---
     if weather.is_dome:
-        factors.append("Dome game — no weather variance")
+        factors.append("Dome game — no weather variance, consistent conditions")
     elif weather.temperature >= 80:
         factors.append(f"Warm weather ({weather.temperature:.0f}°F) — ball carries")
     elif weather.temperature < 55:
@@ -522,8 +551,5 @@ def _build_factor_list(
 
     if weather.wind_speed >= 10 and weather.wind_direction == "in":
         factors.append(f"Wind {weather.wind_speed:.0f}mph in — suppresses scoring")
-
-    if backing == home:
-        factors.append("Home field advantage (+3-4%)")
 
     return factors

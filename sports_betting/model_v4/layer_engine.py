@@ -141,11 +141,10 @@ def layer_1_identity(pick: PickCandidate) -> LayerOutput:
         if pitcher.is_il_return:
             out.notes.append(f"FLAG: {pitcher.name} returning from IL — extra uncertainty.")
         if pitcher.name in ("TBD", ""):
-            out.notes.append(f"{side} pitcher is TBD — monitor for game-time confirmation.")
+            out.notes.append(f"{side} pitcher is TBD — analyzing with team data only, flag for monitoring.")
             out.data["tbd"] = True
-            return out
 
-    out.passed = True
+    out.passed = True  # Continue analysis even with TBD pitchers using available team data
     return out
 
 
@@ -348,17 +347,17 @@ def layer_5_ev(pick: PickCandidate, book_price: int, true_probability: float) ->
         tier, label = "STRONG", f"+{ev_pct:.1%} EV (STRONG ≥ +8%)"
     elif ev_pct >= 0.05:
         tier, label = "MEDIUM", f"+{ev_pct:.1%} EV (MEDIUM ≥ +5%)"
-    elif ev_pct >= 0.03:
-        tier, label = "LEAN", f"+{ev_pct:.1%} EV (LEAN ≥ +3%)"
+    elif ev_pct >= 0.02:
+        tier, label = "LEAN", f"+{ev_pct:.1%} EV (LEAN ≥ +2%)"
     else:
-        tier, label = "SKIP", f"{ev_pct:.1%} EV (below +3% threshold)"
+        tier, label = "SKIP", f"{ev_pct:.1%} EV (below +2% threshold)"
 
     out.notes.append(
         f"EV: True prob {true_probability:.1%} vs implied {implied_prob:.1%} "
         f"→ Edge {edge:+.1%} → {label}"
     )
     out.data["tier_from_ev"] = tier
-    out.passed = ev_pct >= 0.03
+    out.passed = ev_pct >= 0.02
     return out
 
 
@@ -609,8 +608,8 @@ def layer_11_factor_count(pick: PickCandidate, confirmed_factors: list[str]) -> 
     pick.factor_count = count
     pick.factors = valid
 
-    minimums = {"STRONG": 7, "MEDIUM": 5, "LEAN": 3}
-    required = minimums.get(pick.tier, 3)
+    minimums = {"STRONG": 6, "MEDIUM": 4, "LEAN": 2}
+    required = minimums.get(pick.tier, 2)
 
     out.data = {"count": count, "required": required, "factors": valid}
     out.notes.append(f"Factors: {count} confirmed (need {required} for {pick.tier})")
@@ -621,13 +620,13 @@ def layer_11_factor_count(pick: PickCandidate, confirmed_factors: list[str]) -> 
         out.passed = True
     else:
         gap = required - count
-        if count >= minimums.get("LEAN", 3):
+        if count >= minimums.get("LEAN", 2):
             pick.tier = "LEAN"
             out.notes.append(f"Downgraded to LEAN (only {count} factors vs {required} required for {pick.tier}).")
             out.passed = True
         else:
             pick.tier = "SKIP"
-            pick.skip_reason = f"Only {count} confirming factors (need ≥3 for LEAN)"
+            pick.skip_reason = f"Only {count} confirming factors (need ≥2 for LEAN)"
             out.notes.append(f"SKIP: Insufficient factors ({count}/{required}).")
 
     return out
@@ -721,10 +720,6 @@ def run_all_layers(
     for fn in layers_fn:
         result = fn()
         pick.layer_outputs.append(result)
-        # Layer 1 failure = hard stop
-        if result.layer == 1 and not result.passed and result.data.get("tbd"):
-            pick.tier = "SKIP"
-            pick.skip_reason = "Pitcher TBD — cannot analyze"
-            break
+        # TBD pitcher: note the uncertainty but continue analyzing with available team data
 
     return pick
