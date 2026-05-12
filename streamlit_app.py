@@ -294,30 +294,18 @@ def render_picks_tab(picks: list):
 
     tier_badge_color = {"STRONG": "#ef4444", "MEDIUM": "#f59e0b", "LEAN": "#94a3b8"}.get(potd.tier, "#94a3b8")
 
-    st.markdown(f"""
-    <div style="background:linear-gradient(135deg,#111827 0%,#1a1208 100%);
-                border:1px solid #f59e0b44;border-radius:16px;
-                padding:28px 32px;margin-bottom:24px;position:relative;overflow:hidden">
-        <div style="position:absolute;top:0;right:0;width:200px;height:200px;
-                    background:radial-gradient(circle,#f59e0b08,transparent);
-                    border-radius:50%;transform:translate(30%,-30%)"></div>
+    st.html(f"""
+    <div style="background:linear-gradient(135deg,#111827 0%,#1a1208 100%);border:1px solid #f59e0b44;border-radius:16px;padding:28px 32px;margin-bottom:24px;position:relative;overflow:hidden">
+        <div style="position:absolute;top:0;right:0;width:200px;height:200px;background:radial-gradient(circle,#f59e0b08,transparent);border-radius:50%;transform:translate(30%,-30%)"></div>
         <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap">
             <div>
                 <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
                     <span style="font-size:20px">⭐</span>
-                    <span style="color:#f59e0b;font-size:11px;text-transform:uppercase;
-                                 letter-spacing:0.12em;font-weight:700">Pick of the Day</span>
-                    <span style="background:{tier_badge_color}22;color:{tier_badge_color};
-                                 font-size:11px;font-weight:700;padding:2px 10px;
-                                 border-radius:999px;letter-spacing:0.05em">{potd.tier}</span>
+                    <span style="color:#f59e0b;font-size:11px;text-transform:uppercase;letter-spacing:0.12em;font-weight:700">Pick of the Day</span>
+                    <span style="background:{tier_badge_color}22;color:{tier_badge_color};font-size:11px;font-weight:700;padding:2px 10px;border-radius:999px;letter-spacing:0.05em">{potd.tier}</span>
                 </div>
-                <div style="color:#f1f5f9;font-size:22px;font-weight:800;margin-bottom:6px">
-                    {_short(potd.away_team)} <span style="color:#475569;font-weight:400">@</span> {_short(potd.home_team)}
-                </div>
-                <div style="color:#10b981;font-size:28px;font-weight:800;margin-bottom:8px">
-                    BET: {_short(potd.backing_team)}
-                    <span style="color:#475569;font-size:16px;font-weight:500"> · {mkt}</span>
-                </div>
+                <div style="color:#f1f5f9;font-size:22px;font-weight:800;margin-bottom:6px">{_short(potd.away_team)} <span style="color:#475569;font-weight:400">@</span> {_short(potd.home_team)}</div>
+                <div style="color:#10b981;font-size:28px;font-weight:800;margin-bottom:8px">BET: {_short(potd.backing_team)} <span style="color:#475569;font-size:16px;font-weight:500">· {mkt}</span></div>
                 <div style="color:#475569;font-size:12px">{factors_html}</div>
             </div>
             <div style="text-align:right">
@@ -327,7 +315,7 @@ def render_picks_tab(picks: list):
             </div>
         </div>
     </div>
-    """, unsafe_allow_html=True)
+    """)
 
     # Picks cards
     tier_colors = {"STRONG": "#ef4444", "MEDIUM": "#f59e0b", "LEAN": "#94a3b8"}
@@ -345,23 +333,18 @@ def render_picks_tab(picks: list):
                 break
         also_str = "  ·  ".join(html_lib.escape(str(m)) for m in add_markets[:3]) if add_markets else ""
 
-        st.markdown(f"""
-        <div style="background:#111827;border:1px solid #1e293b;border-left:3px solid {tc};
-                    border-radius:12px;padding:20px 24px;margin-bottom:12px">
+        also_row = f'<div style="color:#475569;font-size:11px;margin-top:4px">Also: {also_str}</div>' if also_str else ''
+        st.html(f"""
+        <div style="background:#111827;border:1px solid #1e293b;border-left:3px solid {tc};border-radius:12px;padding:20px 24px;margin-bottom:12px">
             <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px">
                 <div style="flex:1;min-width:200px">
                     <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-                        <span style="background:{tc}22;color:{tc};font-size:11px;font-weight:700;
-                                     padding:2px 10px;border-radius:999px">{p.tier}</span>
+                        <span style="background:{tc}22;color:{tc};font-size:11px;font-weight:700;padding:2px 10px;border-radius:999px">{p.tier}</span>
                         <span style="color:#f59e0b;font-size:12px">✓ {p.factor_count} factors</span>
                     </div>
-                    <div style="color:#f1f5f9;font-size:16px;font-weight:700">
-                        {_short(p.away_team)} <span style="color:#475569">@</span> {_short(p.home_team)}
-                    </div>
-                    <div style="color:#10b981;font-size:13px;font-weight:600;margin-top:2px">
-                        ➜ {_short(p.backing_team)} · {mkt}
-                    </div>
-                    {f'<div style="color:#475569;font-size:11px;margin-top:4px">Also: {also_str}</div>' if also_str else ''}
+                    <div style="color:#f1f5f9;font-size:16px;font-weight:700">{_short(p.away_team)} <span style="color:#475569">@</span> {_short(p.home_team)}</div>
+                    <div style="color:#10b981;font-size:13px;font-weight:600;margin-top:2px">➜ {_short(p.backing_team)} · {mkt}</div>
+                    {also_row}
                     <div style="color:#475569;font-size:11px;margin-top:6px">{factors_str}</div>
                 </div>
                 <div style="text-align:right">
@@ -371,7 +354,7 @@ def render_picks_tab(picks: list):
                 </div>
             </div>
         </div>
-        """, unsafe_allow_html=True)
+        """)
 
     with st.expander("📋 Losing Scenarios & Full Analysis"):
         for p in active:
@@ -407,35 +390,23 @@ def render_parlays_tab(parlays: list, nrfi_parlay: dict | None):
         ev_col = "#10b981" if parlay.ev_pct >= 0 else "#ef4444"
         legs_n = len(parlay.legs)
 
-        st.markdown(f"""
-        <div style="background:#111827;border:1px solid #1e293b;border-top:2px solid {accent};
-                    border-radius:12px;padding:20px 24px;margin-bottom:14px">
+        warn_str = f' · {warn}' if warn else ''
+        st.html(f"""
+        <div style="background:#111827;border:1px solid #1e293b;border-top:2px solid {accent};border-radius:12px;padding:20px 24px;margin-bottom:14px">
             <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:14px">
                 <div style="display:flex;align-items:center;gap:10px">
                     <span style="font-size:18px">{icon}</span>
                     <span style="color:#f1f5f9;font-size:15px;font-weight:700">{star}{label}</span>
-                    <span style="color:#475569;font-size:12px">{legs_n}-leg{' · ' + warn if warn else ''}</span>
+                    <span style="color:#475569;font-size:12px">{legs_n}-leg{warn_str}</span>
                 </div>
                 <div style="display:flex;gap:24px">
-                    <div style="text-align:center">
-                        <div style="color:#475569;font-size:10px;text-transform:uppercase;letter-spacing:0.08em">Odds</div>
-                        <div style="color:#f59e0b;font-size:18px;font-weight:800">+{parlay.american_odds:,}</div>
-                    </div>
-                    <div style="text-align:center">
-                        <div style="color:#475569;font-size:10px;text-transform:uppercase;letter-spacing:0.08em">Stake</div>
-                        <div style="color:#f1f5f9;font-size:15px;font-weight:600">{stake}</div>
-                    </div>
-                    <div style="text-align:center">
-                        <div style="color:#475569;font-size:10px;text-transform:uppercase;letter-spacing:0.08em">Win</div>
-                        <div style="color:#10b981;font-size:15px;font-weight:600">~${parlay.payout_per_unit:.0f}</div>
-                    </div>
-                    <div style="text-align:center">
-                        <div style="color:#475569;font-size:10px;text-transform:uppercase;letter-spacing:0.08em">EV</div>
-                        <div style="color:{ev_col};font-size:15px;font-weight:600">{parlay.ev_pct:+.1%}</div>
-                    </div>
+                    <div style="text-align:center"><div style="color:#475569;font-size:10px;text-transform:uppercase;letter-spacing:0.08em">Odds</div><div style="color:#f59e0b;font-size:18px;font-weight:800">+{parlay.american_odds:,}</div></div>
+                    <div style="text-align:center"><div style="color:#475569;font-size:10px;text-transform:uppercase;letter-spacing:0.08em">Stake</div><div style="color:#f1f5f9;font-size:15px;font-weight:600">{stake}</div></div>
+                    <div style="text-align:center"><div style="color:#475569;font-size:10px;text-transform:uppercase;letter-spacing:0.08em">Win</div><div style="color:#10b981;font-size:15px;font-weight:600">~${parlay.payout_per_unit:.0f}</div></div>
+                    <div style="text-align:center"><div style="color:#475569;font-size:10px;text-transform:uppercase;letter-spacing:0.08em">EV</div><div style="color:{ev_col};font-size:15px;font-weight:600">{parlay.ev_pct:+.1%}</div></div>
                 </div>
             </div>
-        """, unsafe_allow_html=True)
+        """)
 
         leg_rows = []
         for j, leg in enumerate(parlay.legs, 1):
@@ -450,29 +421,28 @@ def render_parlays_tab(parlays: list, nrfi_parlay: dict | None):
             })
         st.dataframe(pd.DataFrame(leg_rows), hide_index=True, use_container_width=True)
 
-        note = parlay.independence_notes[0] if parlay.independence_notes else ""
+        note = html_lib.escape(parlay.independence_notes[0] if parlay.independence_notes else "")
         nc = "#10b981" if "PASS" in note else "#f59e0b"
-        st.markdown(f'<div style="color:{nc};font-size:11px;margin-top:6px">{note}</div></div>', unsafe_allow_html=True)
+        st.html(f'<div style="color:{nc};font-size:11px;margin-top:6px">{note}</div>')
 
     if nrfi_parlay and isinstance(nrfi_parlay, dict):
         am = nrfi_parlay.get("american_odds", "")
         pw = nrfi_parlay.get("potential_win", 0)
-        st.markdown(f"""
-        <div style="background:linear-gradient(135deg,#0a1f0e,#111827);border:1px solid #10b98133;
-                    border-radius:12px;padding:20px 24px;margin-top:8px">
+        st.html(f"""
+        <div style="background:linear-gradient(135deg,#0a1f0e,#111827);border:1px solid #10b98133;border-radius:12px;padding:20px 24px;margin-top:8px">
             <div style="color:#10b981;font-size:11px;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:10px">🚫 NRFI Bonus Parlay</div>
             <div style="display:flex;gap:28px;flex-wrap:wrap;margin-bottom:12px">
-                <div><div style="color:#475569;font-size:10px">TYPE</div><div style="color:#f1f5f9;font-weight:700">{nrfi_parlay.get("type","")}</div></div>
-                <div><div style="color:#475569;font-size:10px">ODDS</div><div style="color:#f59e0b;font-weight:700">{am}</div></div>
-                <div><div style="color:#475569;font-size:10px">STAKE</div><div style="color:#f1f5f9;font-weight:700">{nrfi_parlay.get("recommended_stake","")}</div></div>
+                <div><div style="color:#475569;font-size:10px">TYPE</div><div style="color:#f1f5f9;font-weight:700">{html_lib.escape(str(nrfi_parlay.get("type","")))}</div></div>
+                <div><div style="color:#475569;font-size:10px">ODDS</div><div style="color:#f59e0b;font-weight:700">{html_lib.escape(str(am))}</div></div>
+                <div><div style="color:#475569;font-size:10px">STAKE</div><div style="color:#f1f5f9;font-weight:700">{html_lib.escape(str(nrfi_parlay.get("recommended_stake","")))}</div></div>
                 <div><div style="color:#475569;font-size:10px">WIN</div><div style="color:#10b981;font-weight:700">~${pw:.0f}</div></div>
             </div>
-        """, unsafe_allow_html=True)
+        </div>
+        """)
         legs = nrfi_parlay.get("legs", [])
         if legs:
             rows = [{"Game": g.get("game","?"), "NRFI %": f"{g.get('nrfi_probability',0):.1%}", "Tier": g.get("tier","?")} for g in legs]
             st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
-        st.markdown("</div>", unsafe_allow_html=True)
 
 
 def render_nrfi_tab(nrfi_ranked: list, nrfi_parlay: dict | None = None):
