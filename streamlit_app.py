@@ -5,6 +5,7 @@ Runs on Streamlit Cloud (free). Works on phone, tablet, any browser.
 import os
 import sys
 import json
+import html as html_lib
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -288,8 +289,8 @@ def render_picks_tab(picks: list):
     # POTD banner
     potd = next((p for p in active if p.tier == "STRONG"), active[0])
     units = UNIT_MAP.get(potd.tier, 1)
-    mkt = potd.recommended_market or potd.proposed_market or "ML"
-    factors_html = "  ·  ".join(potd.factors[:3])
+    mkt = html_lib.escape(potd.recommended_market or potd.proposed_market or "ML")
+    factors_html = "  ·  ".join(html_lib.escape(str(f)) for f in potd.factors[:3])
 
     tier_badge_color = {"STRONG": "#ef4444", "MEDIUM": "#f59e0b", "LEAN": "#94a3b8"}.get(potd.tier, "#94a3b8")
 
@@ -332,9 +333,9 @@ def render_picks_tab(picks: list):
     tier_colors = {"STRONG": "#ef4444", "MEDIUM": "#f59e0b", "LEAN": "#94a3b8"}
     for p in active:
         u = UNIT_MAP.get(p.tier, 1)
-        mkt = p.recommended_market or p.proposed_market or "ML"
+        mkt = html_lib.escape(p.recommended_market or p.proposed_market or "ML")
         tc = tier_colors.get(p.tier, "#94a3b8")
-        factors_str = "  ·  ".join(p.factors[:3]) if p.factors else "—"
+        factors_str = "  ·  ".join(html_lib.escape(str(f)) for f in p.factors[:3]) if p.factors else "—"
 
         # Get additional markets from layer 8
         add_markets = []
@@ -342,7 +343,7 @@ def render_picks_tab(picks: list):
             if lo.layer == 8:
                 add_markets = lo.data.get("additional_markets", [])
                 break
-        also_str = "  ·  ".join(add_markets[:3]) if add_markets else ""
+        also_str = "  ·  ".join(html_lib.escape(str(m)) for m in add_markets[:3]) if add_markets else ""
 
         st.markdown(f"""
         <div style="background:#111827;border:1px solid #1e293b;border-left:3px solid {tc};
