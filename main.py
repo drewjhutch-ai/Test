@@ -3,12 +3,13 @@
 MLB Sports Betting Intelligence System — Main Entry Point
 
 Usage:
-    python main.py                  # Run once and display dashboard
-    python main.py --loop           # Run continuously (refreshes every 5 min)
+    python main.py                  # Run model v4.0 (default — 12-layer framework)
+    python main.py --date 2026-05-12 # Run v4 for a specific date
+    python main.py --loop           # Run v4 continuously (refreshes every 5 min)
     python main.py --report         # Generate daily report only
-    python main.py --retrain        # Force model retraining
+    python main.py --retrain        # Force ML model retraining
     python main.py --export-csv     # Export value bets to CSV
-    python main.py --demo           # Run with mock data (no API keys needed)
+    python main.py --roi            # Show season ROI summary
 
 Setup:
     1. Copy .env.example to .env
@@ -34,6 +35,7 @@ from sports_betting.output.reporter import generate_daily_report, print_best_pla
 from sports_betting.models.trainer import maybe_retrain, compute_roi_summary
 from sports_betting.database import get_recent_value_bets, get_recent_arb_opportunities, get_recent_sharp_plays
 from sports_betting.config import LOG_LEVEL
+from sports_betting.model_v4.daily_runner import run_daily_model
 
 console = Console()
 
@@ -124,6 +126,8 @@ def main():
                         help="Run continuously, refreshing every 5 minutes")
     parser.add_argument("--interval", type=int, default=5,
                         help="Refresh interval in minutes when using --loop (default: 5)")
+    parser.add_argument("--date", type=str, default=None,
+                        help="Date to run model for (YYYY-MM-DD). Defaults to today.")
     parser.add_argument("--report", action="store_true",
                         help="Print today's report and exit")
     parser.add_argument("--retrain", action="store_true",
@@ -182,11 +186,20 @@ def main():
         return
 
     if args.loop:
-        run_loop(engine, interval_minutes=args.interval)
+        # v4 loop mode
+        console.print(f"[bold cyan]Model v4.0 — continuous mode ({args.interval}-min refresh)[/bold cyan]")
+        run_daily_model(args.date)
+        schedule.every(args.interval).minutes.do(run_daily_model, date_str=args.date)
+        try:
+            while True:
+                schedule.run_pending()
+                time.sleep(30)
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Exiting.[/yellow]")
         return
 
-    # Default: run once
-    run_pipeline(engine)
+    # Default: model v4.0 single run
+    run_daily_model(args.date)
 
 
 if __name__ == "__main__":
