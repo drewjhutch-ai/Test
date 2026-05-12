@@ -471,16 +471,17 @@ def render_hr_parlay_tab(hr_results: dict):
     st.markdown("### 💣 Home Run Parlay")
     st.caption("3-leg HR parlays built from batter barrel rate, park factor, pitcher vulnerability, weather, and odds value.")
 
+    # Always ensure we have data — fall back to running analysis directly
     if not hr_results or not hr_results.get("candidates"):
-        st.info(hr_results.get("data_note", "No HR prop data available. Add ODDS_API_KEY in Streamlit secrets to enable live odds."))
-        st.markdown("""
-        **How this works once enabled:**
-        - Pulls live HR prop odds from DraftKings via The Odds API
-        - Scores each batter on 5 factors: HR rate, pitcher vulnerability, park factor, weather, handedness splits
-        - Builds 3 different 3-leg parlays: Best overall · Best EV · Moonshot (highest odds)
-        - ⭐ = model's highest confidence selection
-        """)
-        return
+        try:
+            from sports_betting.collectors.hr_props_collector import run_hr_parlay_analysis
+            hr_results = run_hr_parlay_analysis([], {})
+        except Exception as e:
+            st.error(f"HR parlay analysis failed: {e}")
+            return
+        if not hr_results or not hr_results.get("candidates"):
+            st.info("No HR prop candidates available today.")
+            return
 
     st.caption(hr_results.get("data_note", ""))
 
@@ -588,13 +589,14 @@ def render_signals_tab():
     st.caption("Weights auto-adjust after every game cycle. Signals hitting >60% get boosted.")
 
 
-def render_record_bet_tab(picks: list = None, parlays: list = None, nrfi_ranked: list = None):
+def render_record_bet_tab(picks: list = None, parlays: list = None, nrfi_ranked: list = None, hr_results: dict = None):
     st.markdown("### 📝 Record a Bet You Placed")
     st.caption("Logging your actual bets teaches the model which signals work best over time.")
 
     picks       = picks or []
     parlays     = parlays or []
     nrfi_ranked = nrfi_ranked or []
+    hr_results  = hr_results or {}
 
     # Build game options from today's active picks
     active_picks = [p for p in picks if p.tier != "SKIP"]
@@ -619,7 +621,7 @@ def render_record_bet_tab(picks: list = None, parlays: list = None, nrfi_ranked:
     # ── Bet type selector ──────────────────────────────────────────────
     bet_type = st.radio(
         "What are you recording?",
-        ["🎯 Single Bet", "🎰 Parlay"],
+        ["🎯 Single Bet", "🎰 Parlay", "💣 HR Parlay"],
         horizontal=True,
     )
     st.markdown("---")
@@ -696,6 +698,95 @@ def render_record_bet_tab(picks: list = None, parlays: list = None, nrfi_ranked:
                 )
                 st.success(f"✅ Recorded: **{side_clean}** {market} @ {int(price):+d}  ·  {units}u / ${dollar_amount:.2f}")
                 st.caption("The model will grade this automatically after the game completes and update signal weights.")
+
+    # ── HR PARLAY RECORDER ─────────────────────────────────────────────
+    elif bet_type == "💣 HR Parlay":
+        st.markdown("#### Record an HR Parlay")
+        st.caption("Select one of today's model-built HR parlays to record, or enter manually.")
+
+        # Get HR parlays from results
+        hr_parlays = hr_results.get("parlays", [])
+        if not hr_parlays:
+            try:
+                from sports_betting.collectors.hr_props_collector import run_hr_parlay_analysis
+                _hr = run_hr_parlay_analysis([], {})
+                hr_parlays = _hr.get("parlays", [])
+            except Exception:
+                hr_parlays = []
+
+        if hr_parlays:
+            parlay_labels = [p.get("label", f"HR Parlay {i+1}") for i, p in enumerate(hr_parlays)]
+            selected_hr_label = st.selectbox("Select HR Parlay", parlay_labels)
+            selected_hr = next((p for p in hr_parlays if p.get("label") == selected_hr_label), hr_parlays[0])
+
+            # Show parlay details
+            legs = selected_hr.get("legs", [])
+            odds = selected_hr.get("combined_odds", 0)
+            odds_str = f"+{odds:,}" if odds > 0 else f"{odds:,}"
+            prob = selected_hr.get("combined_prob", 0)
+            ev = selected_hr.get("ev_pct", 0)
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Odds", odds_str)
+            c2.metric("Win Prob", f"{prob:.1%}")
+            c3.metric("EV", f"{ev:+.1%}")
+
+            if legs:
+                st.markdown("**Legs:**")
+                for j, leg in enumerate(legs, 1):
+                    lp = leg.get("price", 0)
+                    st.markdown(
+                        f"  **{j}.** {leg.get('batter','?')} — {leg.get('game','?')}  "
+                        f"| Price: {'+' if lp > 0 else ''}{lp}  "
+                        f"| HR Prob: {leg.get('composite_prob',0):.1%}"
+                    )
+        else:
+            st.info("No HR parlays loaded. Run the model first or they'll be shown here automatically.")
+            selected_hr = None
+            legs = []
+            odds_str = "+0"
+            odds = 0
+
+        with st.form("record_hr_parlay", clear_on_submit=True):
+            col1, col2 = st.columns(2)
+            with col1:
+                hr_stake = st.number_input("Stake ($)", value=5, min_value=1, step=1)
+                if odds > 0:
+                    potential = round(odds / 100 * hr_stake, 2)
+                elif odds < 0:
+                    potential = round(100 / abs(odds) * hr_stake, 2)
+                else:
+                    potential = 0.0
+                st.caption(f"💵 Potential win: ${potential:,.2f}  (total return ${potential + hr_stake:,.2f})")
+            with col2:
+                hr_book = st.selectbox("Book", ["DraftKings", "FanDuel", "BetMGM", "Caesars", "Other"])
+                hr_note = st.text_input("Note (optional)", placeholder="e.g. HR Parlay A — Judge/Alvarez/Schwarber")
+
+            hr_submitted = st.form_submit_button("✅ Record HR Parlay", type="primary", use_container_width=True)
+            if hr_submitted:
+                parlay_id = f"hr_parlay_{__import__('datetime').datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                for j, leg in enumerate(legs, 1):
+                    batter = leg.get("batter", f"batter_{j}").lower().replace(" ", "_")
+                    game_id = f"{parlay_id}_leg{j}_{batter}"
+                    record_placed_bet(
+                        game_id=game_id,
+                        book=hr_book.lower().replace(" ", ""),
+                        market="hr_prop",
+                        side=batter,
+                        price=leg.get("price", -130),
+                        units=round(hr_stake / UNIT_SIZE, 2),
+                        signals_present=[
+                            f"hr_parlay:{parlay_id}",
+                            f"leg:{j}of{len(legs)}",
+                            f"barrel:{leg.get('barrel_rate',0):.1%}",
+                        ],
+                    )
+                st.success(
+                    f"✅ Recorded HR parlay ({len(legs)} legs)  ·  "
+                    f"Odds: {odds_str}  ·  Stake: ${hr_stake}  ·  To win: ${potential:,.2f}"
+                )
+                if hr_note:
+                    st.caption(f"Note: {hr_note}")
 
     # ── PARLAY BUILDER ─────────────────────────────────────────────────
     else:
@@ -889,7 +980,7 @@ def main():
     with tabs[4]: render_intelligence_tab(all_signals, xwoba_luck, picks, sharp_plays)
     with tabs[5]: render_skipped_tab(skipped)
     with tabs[6]: render_signals_tab()
-    with tabs[7]: render_record_bet_tab(picks, parlays, nrfi_ranked)
+    with tabs[7]: render_record_bet_tab(picks, parlays, nrfi_ranked, hr_results)
 
     # Footer
     st.markdown("---")
