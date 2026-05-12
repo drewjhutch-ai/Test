@@ -97,8 +97,7 @@ def render_sidebar():
     st.sidebar.markdown("---")
     st.sidebar.markdown("**Hard Rules Active**")
     st.sidebar.markdown(
-        "❌ No totals in parlays\n\n"
-        "❌ No LAA in parlays\n\n"
+        "✅ Totals included when 3+ signals\n\n"
         "❌ No Sweep G3 in parlays\n\n"
         "❌ No debut K props\n\n"
         "❌ Max 3 picks/team/7 days"
@@ -745,9 +744,19 @@ def render_record_bet_tab(picks: list = None, parlays: list = None, nrfi_ranked:
                 side_clean = side.replace(" (Model Pick ⭐)", "").strip()
 
                 market = st.selectbox("Market", [
-                    "Full Game ML", "F5 ML", "Run Line -1.5", "Run Line +1.5",
-                    "NRFI", "YRFI", "Game Over", "Game Under",
-                    "K Over", "K Under", "ERA Under",
+                    "Full Game ML", "F5 ML",
+                    "Run Line -1.5", "Run Line +1.5",
+                    "NRFI", "YRFI",
+                    "Game Over", "Game Under",
+                    "F5 Over", "F5 Under",
+                    "K Over", "K Under",
+                    "Outs Recorded Over", "Outs Recorded Under",
+                    "Earned Runs Under", "Earned Runs Over",
+                    "Hits Over", "Hits Under",
+                    "Total Bases Over", "Total Bases Under",
+                    "HR (batter prop)",
+                    "RBI Over", "RBI Under",
+                    "First Inning Over", "First Inning Under",
                 ])
 
             with col2:
@@ -904,8 +913,12 @@ def render_record_bet_tab(picks: list = None, parlays: list = None, nrfi_ranked:
                 side = st.selectbox("Side", t_opts, key=f"ps_{i}")
             with c3:
                 mkt = st.selectbox("Market", [
-                    "Full Game ML", "F5 ML", "Run Line", "NRFI", "YRFI",
-                    "Game Over", "Game Under", "HR",
+                    "Full Game ML", "F5 ML", "Run Line -1.5", "Run Line +1.5",
+                    "NRFI", "YRFI",
+                    "Game Over", "Game Under", "F5 Over", "F5 Under",
+                    "K Over", "K Under",
+                    "Outs Recorded Over",
+                    "Total Bases Over", "HR (batter prop)",
                 ], key=f"pm_{i}")
             with c4:
                 default_p = -130

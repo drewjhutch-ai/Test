@@ -535,6 +535,14 @@ def _build_factor_list(
 
     if sp.siera < 3.80:
         factors.append(f"SP elite SIERA: {sp.siera:.2f}")
+    if sp.xfip < 3.50:
+        factors.append(f"SP xFIP {sp.xfip:.2f} (elite, true skill indicator)")
+    if sp.hard_hit_rate < 0.33:
+        factors.append(f"SP hard hit% {sp.hard_hit_rate:.0%} (elite soft contact)")
+    if sp.gb_pct >= 0.52:
+        factors.append(f"SP ground ball% {sp.gb_pct:.0%} (limits HR damage)")
+    if sp.ip_per_start >= 6.2:
+        factors.append(f"SP averaging {sp.ip_per_start:.1f} IP/start (goes deep, limits bullpen use)")
     if sp.era < 3.50:
         factors.append(f"SP ERA {sp.era:.2f} (strong)")
     if sp.k9 >= 9.0:
@@ -553,7 +561,13 @@ def _build_factor_list(
     # Opposing pitcher ERA vulnerability
     if opp_sp.era >= 4.50 and opp_sp.name not in ("TBD", ""):
         factors.append(f"Opposing SP {opp_sp.name} ERA {opp_sp.era:.2f} (exploitable)")
-    elif opp_sp.name in ("TBD", ""):
+    if opp_sp.xfip >= 4.80 and opp_sp.name not in ("TBD", ""):
+        factors.append(f"Opposing SP {opp_sp.name} xFIP {opp_sp.xfip:.2f} (HR-prone, skills worse than ERA)")
+    if opp_sp.hard_hit_rate >= 0.42 and opp_sp.name not in ("TBD", ""):
+        factors.append(f"Opposing SP {opp_sp.name} hard hit% {opp_sp.hard_hit_rate:.0%} (hitters squaring up)")
+    if opp_sp.fly_ball_pct >= 0.42 and opp_sp.name not in ("TBD", ""):
+        factors.append(f"Opposing SP {opp_sp.name} fly ball% {opp_sp.fly_ball_pct:.0%} (HR risk in hitter park)")
+    if opp_sp.name in ("TBD", ""):
         factors.append("Opposing SP unconfirmed (TBD) — scheduling uncertainty favors prepared side")
 
     # --- Team record & form ---

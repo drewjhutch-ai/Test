@@ -273,6 +273,29 @@ def enrich_pitcher_profile(pitcher_profile, fg_stats: dict, sc_stats: dict):
     if data.get("barrel_rate"):
         pitcher_profile.barrel_rate = data["barrel_rate"] / 100 if data["barrel_rate"] > 1 else data["barrel_rate"]
 
+    # Enrich new metrics
+    last = pitcher_profile.name.split()[-1].lower() if pitcher_profile.name not in ("TBD", "") else ""
+    sc = sc_stats.get(last, {})
+    profile_hard_hit = sc.get("hard_hit_pct") or sc.get("hard_hit_rate")
+    if profile_hard_hit is not None:
+        pitcher_profile.hard_hit_rate = profile_hard_hit / 100 if profile_hard_hit > 1 else profile_hard_hit
+    else:
+        pitcher_profile.hard_hit_rate = sc.get("hard_hit_rate", 0.37)
+    avg_exit = sc.get("avg_exit_velo")
+    if avg_exit is not None:
+        pitcher_profile.avg_exit_velo = avg_exit
+    fg = fg_stats.get(last, {})
+    fly_ball = fg.get("fly_ball_pct") or fg.get("FB%")
+    pitcher_profile.fly_ball_pct = (fly_ball / 100 if (fly_ball or 0) > 1 else fly_ball) if fly_ball else 0.35
+    gb = fg.get("gb_pct") or fg.get("GB%")
+    pitcher_profile.gb_pct = (gb / 100 if (gb or 0) > 1 else gb) if gb else 0.45
+    hr_fb = fg.get("hr_fb_rate") or fg.get("HR/FB")
+    pitcher_profile.hr_fb_rate = (hr_fb / 100 if (hr_fb or 0) > 1 else hr_fb) if hr_fb else 0.13
+    gs = fg.get("gs") or 0
+    ip = fg.get("ip") or 0.0
+    if gs and ip:
+        pitcher_profile.ip_per_start = round(ip / gs, 2)
+
     # Mark as confirmed from 2 real sources
     pitcher_profile.confirmed_sources = 2
 
