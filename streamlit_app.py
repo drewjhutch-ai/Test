@@ -366,7 +366,7 @@ def render_nrfi_tab(nrfi_ranked: list, nrfi_parlay: dict | None = None):
     """)
 
 
-def render_intelligence_tab(all_signals: dict, xwoba_luck: dict, games: list):
+def render_intelligence_tab(all_signals: dict, xwoba_luck: dict, games: list, sharp_plays: list = None):
     """Signal 📡 Intelligence — all 13 signals summarized per game."""
     from sports_betting.signals.clv_tracker import get_clv_summary
 
@@ -452,6 +452,19 @@ def render_intelligence_tab(all_signals: dict, xwoba_luck: dict, games: list):
                 })
         if rows:
             st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+    # Sharp money signals
+    if sharp_plays:
+        st.markdown("---")
+        st.markdown("### 🔍 Sharp Money Signals")
+        for sp in sharp_plays[:8]:
+            strength = sp.get("signal_strength", 0)
+            color = "red" if strength >= 0.7 else "orange" if strength >= 0.4 else "gray"
+            st.markdown(
+                f"**{sp.get('signal_type','?')}** — "
+                f":{color}[Strength: {strength:.0%}]  \n"
+                f"_{sp.get('notes','')}_"
+            )
 
 
 def render_hr_parlay_tab(hr_results: dict):
@@ -788,31 +801,34 @@ def render_record_bet_tab(picks: list = None, parlays: list = None, nrfi_ranked:
         from sports_betting.database import get_db
         with get_db() as conn:
             rows = conn.execute("""
-                SELECT game_id, market, side, price, units, result, created_at
+                SELECT game_id, market, side, book_price, recommended_bet, result, detected_at
                 FROM value_bets
-                ORDER BY created_at DESC
+                WHERE confidence = 'PLACED'
+                ORDER BY detected_at DESC
                 LIMIT 15
             """).fetchall()
         if rows:
             hist = []
             for r in rows:
                 result_str = r[5] or "Pending"
-                color = "🟢" if result_str == "WIN" else "🔴" if result_str == "LOSS" else "⏳"
+                icon = "🟢" if result_str == "WIN" else "🔴" if result_str == "LOSS" else "⏳"
+                units_val = round((r[4] or 0) / UNIT_SIZE, 1)
                 hist.append({
-                    "":       color,
-                    "Game":   str(r[0])[:25],
+                    "":       icon,
+                    "Game":   str(r[0])[:28],
                     "Market": r[1] or "?",
-                    "Side":   r[2] or "?",
-                    "Price":  f"{r[3]:+d}" if r[3] else "?",
-                    "Units":  r[4],
+                    "Side":   str(r[2]).upper() if r[2] else "?",
+                    "Price":  f"{int(r[3]):+d}" if r[3] else "?",
+                    "Units":  units_val,
+                    "Stake":  f"${r[4]:.2f}" if r[4] else "?",
                     "Result": result_str,
                     "Date":   str(r[6])[:10] if r[6] else "?",
                 })
             st.dataframe(pd.DataFrame(hist), hide_index=True, use_container_width=True)
         else:
-            st.caption("No bets recorded yet. Your history will appear here.")
-    except Exception:
-        st.caption("Bet history unavailable.")
+            st.caption("No bets recorded yet — your history appears here once you submit a bet above.")
+    except Exception as e:
+        st.caption(f"Bet history unavailable: {e}")
 
 
 # ── App entry point ───────────────────────────────────────────────────
@@ -870,20 +886,10 @@ def main():
     with tabs[1]: render_parlays_tab(parlays, nrfi_parlay)
     with tabs[2]: render_nrfi_tab(nrfi_ranked, nrfi_parlay)
     with tabs[3]: render_hr_parlay_tab(hr_results)
-    with tabs[4]: render_intelligence_tab(all_signals, xwoba_luck, picks)
+    with tabs[4]: render_intelligence_tab(all_signals, xwoba_luck, picks, sharp_plays)
     with tabs[5]: render_skipped_tab(skipped)
     with tabs[6]: render_signals_tab()
     with tabs[7]: render_record_bet_tab(picks, parlays, nrfi_ranked)
-
-    # Sharp money alerts
-    if sharp_plays:
-        with st.expander(f"🔍 Sharp Money Signals ({len(sharp_plays)})"):
-            for sp in sharp_plays[:8]:
-                st.markdown(
-                    f"**{sp.get('signal_type','?')}** — "
-                    f"Strength: {sp.get('signal_strength',0):.0%}  \n"
-                    f"_{sp.get('notes','')}_"
-                )
 
     # Footer
     st.markdown("---")
