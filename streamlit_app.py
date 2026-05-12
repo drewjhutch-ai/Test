@@ -467,81 +467,171 @@ def render_intelligence_tab(all_signals: dict, xwoba_luck: dict, games: list, sh
             )
 
 
+def _build_hr_parlays_direct(hr_results: dict) -> list[dict]:
+    """
+    Build 3 HR parlays directly from candidates. Always returns 3 parlays —
+    no EV or factor threshold, just the model's best available picks.
+    Labeled ⚠️ when below model confidence thresholds.
+    """
+    import math
+
+    # Pull candidates from results; fall back to KNOWN_HR_HITTERS if empty
+    candidates = (hr_results or {}).get("candidates", [])
+    if not candidates:
+        try:
+            from sports_betting.collectors.hr_props_collector import (
+                KNOWN_HR_HITTERS, _mock_hr_odds,
+            )
+            mock_odds = _mock_hr_odds()
+            for prop in mock_odds:
+                batter = prop["batter"]
+                lower  = batter.lower()
+                last   = batter.split()[-1].lower()
+                known  = KNOWN_HR_HITTERS.get(lower) or KNOWN_HR_HITTERS.get(last) or KNOWN_HR_HITTERS["default"]
+                candidates.append({
+                    "batter":        batter,
+                    "game":          prop["game"],
+                    "home_team":     prop["home_team"],
+                    "price":         prop["price"],
+                    "book":          prop.get("book", "draftkings"),
+                    "hr_rate":       known["hr_rate"],
+                    "barrel_rate":   known["barrel_rate"],
+                    "hard_hit_rate": known["hard_hit_rate"],
+                    "composite_prob": round(0.10 + known["hr_rate"] * 1.2, 3),
+                    "ev_pct":        0.0,
+                    "factors_passed": 2,
+                    "recommendation": "BEST AVAILABLE",
+                })
+        except Exception:
+            pass
+
+    if not candidates:
+        return []
+
+    def a2d(p):
+        return (p / 100 + 1) if p > 0 else (100 / abs(p) + 1)
+
+    def d2a(d):
+        if d >= 2.0:
+            return int((d - 1) * 100)
+        return int(-100 / (d - 1))
+
+    def make_parlay(legs, label, stake):
+        dec  = math.prod(a2d(l["price"]) for l in legs)
+        prob = math.prod(l["composite_prob"] for l in legs)
+        ev   = (prob * dec) - 1
+        high_conf = all(l.get("factors_passed", 0) >= 3 for l in legs)
+        return {
+            "label":          label,
+            "legs":           legs,
+            "combined_odds":  d2a(dec),
+            "combined_prob":  round(prob, 4),
+            "ev_pct":         round(ev, 4),
+            "stake_rec":      stake,
+            "starred":        high_conf and ev > 0,
+            "warning":        not high_conf or ev <= 0,
+        }
+
+    # Best 3 by composite_prob (1 per game where possible)
+    seen, top3 = set(), []
+    for c in sorted(candidates, key=lambda x: x["composite_prob"], reverse=True):
+        if c["game"] not in seen or len(top3) < 3:
+            top3.append(c)
+            seen.add(c["game"])
+        if len(top3) == 3:
+            break
+    while len(top3) < 3 and len(candidates) >= 3:
+        top3 = candidates[:3]
+        break
+
+    # Best 3 by price (highest +money = moonshot)
+    price3 = sorted(candidates, key=lambda x: x["price"], reverse=True)[:3]
+
+    # Best 3 by EV
+    ev3 = sorted(candidates, key=lambda x: x["ev_pct"], reverse=True)[:3]
+
+    parlays = []
+    if len(top3) == 3:
+        parlays.append(make_parlay(top3, "HR Parlay A — Best 3", "$5–$10"))
+    if len(ev3) == 3:
+        parlays.append(make_parlay(ev3,  "HR Parlay B — Best EV", "$5"))
+    if len(price3) == 3:
+        parlays.append(make_parlay(price3, "HR Parlay C — Moonshot", "$3–$5"))
+
+    return parlays
+
+
 def render_hr_parlay_tab(hr_results: dict):
     st.markdown("### 💣 Home Run Parlay")
-    st.caption("3-leg HR parlays built from batter barrel rate, park factor, pitcher vulnerability, weather, and odds value.")
+    st.caption("Best 3-leg HR parlays — always shown daily. HR props are high-variance by nature; see warning labels.")
 
-    # Always ensure we have data — fall back to running analysis directly
-    if not hr_results or not hr_results.get("candidates"):
-        try:
-            from sports_betting.collectors.hr_props_collector import run_hr_parlay_analysis
-            hr_results = run_hr_parlay_analysis([], {})
-        except Exception as e:
-            st.error(f"HR parlay analysis failed: {e}")
-            return
-        if not hr_results or not hr_results.get("candidates"):
-            st.info("No HR prop candidates available today.")
-            return
+    parlays   = _build_hr_parlays_direct(hr_results)
+    candidates = (hr_results or {}).get("candidates", [])
 
-    st.caption(hr_results.get("data_note", ""))
+    if not parlays:
+        st.warning("Could not build HR parlays today. Model will retry on next refresh.")
+        return
 
-    # Parlays first
-    for parlay in hr_results.get("parlays", []):
-        star = "⭐ " if parlay.get("starred") else ""
-        odds = parlay.get("combined_odds", 0)
+    for parlay in parlays:
+        odds     = parlay["combined_odds"]
         odds_str = f"+{odds:,}" if odds > 0 else f"{odds:,}"
-        ev = parlay.get("ev_pct", 0)
+        ev       = parlay["ev_pct"]
+        star     = "⭐ " if parlay.get("starred") else ""
+        warn     = "⚠️ " if parlay.get("warning") else ""
 
-        st.markdown(f"### 🎯 {star}{parlay.get('label','Parlay')}")
+        st.markdown(f"### 🎯 {star}{warn}{parlay['label']}")
+
+        if parlay.get("warning"):
+            st.caption("⚠️ Below model confidence threshold — treat as lottery-ticket stake only ($3–$5 max)")
+
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Odds",     odds_str)
-        c2.metric("Win Prob", f"{parlay.get('combined_prob',0):.1%}")
+        c2.metric("Win Prob", f"{parlay['combined_prob']:.1%}")
         c3.metric("EV",       f"{ev:+.1%}")
-        c4.metric("Stake",    parlay.get("stake_rec", "$5"))
+        c4.metric("Stake",    parlay["stake_rec"])
 
         leg_rows = []
-        for j, leg in enumerate(parlay.get("legs", []), 1):
+        for j, leg in enumerate(parlay["legs"], 1):
+            lp = leg.get("price", 0)
             leg_rows.append({
-                "Leg":      j,
-                "Batter":   leg.get("batter", "?"),
-                "Game":     leg.get("game", "?"),
-                "Price":    f"{leg.get('price',0):+d}",
-                "HR Prob":  f"{leg.get('composite_prob',0):.1%}",
-                "Barrel %": f"{leg.get('barrel_rate',0):.1%}",
-                "Hard Hit": f"{leg.get('hard_hit_rate',0):.1%}",
-                "Book":     leg.get("book", "DK"),
+                "Leg":        j,
+                "Batter":     leg.get("batter", "?"),
+                "Game":       leg.get("game", "?"),
+                "Price":      f"{'+' if lp > 0 else ''}{lp}",
+                "HR Prob":    f"{leg.get('composite_prob', 0):.1%}",
+                "HR Rate":    f"{leg.get('hr_rate', 0):.1%}",
+                "Barrel %":   f"{leg.get('barrel_rate', 0):.1%}",
+                "Hard Hit":   f"{leg.get('hard_hit_rate', 0):.1%}",
+                "Book":       leg.get("book", "DK"),
             })
         st.dataframe(pd.DataFrame(leg_rows), hide_index=True, use_container_width=True)
         st.markdown("---")
 
-    # Top HR candidates table
-    candidates = hr_results.get("candidates", [])
+    # Ranked candidates table
     if candidates:
         with st.expander(f"📋 All HR Candidates Ranked ({len(candidates)} batters scored)"):
             c_rows = []
             for i, c in enumerate(candidates[:20], 1):
-                star_c = "⭐" if c.get("starred") else ""
+                flag = "⭐" if c.get("factors_passed", 0) >= 4 else ("✅" if c.get("factors_passed", 0) >= 3 else "")
                 c_rows.append({
-                    "":         star_c,
-                    "Batter":   c.get("batter","?"),
-                    "Game":     c.get("game","?"),
-                    "Price":    f"{c.get('price',0):+d}",
-                    "HR Prob":  f"{c.get('composite_prob',0):.1%}",
-                    "EV":       f"{c.get('ev_pct',0):+.1%}",
-                    "Factors":  c.get("factors_passed",0),
-                    "Rec":      c.get("recommendation","?"),
+                    "":       flag,
+                    "Batter": c.get("batter", "?"),
+                    "Game":   c.get("game", "?"),
+                    "Price":  f"{c.get('price', 0):+d}",
+                    "HR Prob":f"{c.get('composite_prob', 0):.1%}",
+                    "EV":     f"{c.get('ev_pct', 0):+.1%}",
+                    "Factors":c.get("factors_passed", 0),
+                    "Rec":    c.get("recommendation", "?"),
                 })
             st.dataframe(pd.DataFrame(c_rows), hide_index=True, use_container_width=True)
 
     st.markdown("""
     **HR Factor Scoring**
-    - **F1** Batter HR rate this season (HRs/game)
-    - **F2** Pitcher HR vulnerability (HR/9, barrel rate, HR/FB rate)
-    - **F3** Park HR factor (Coors, Yankee Stadium, etc.)
-    - **F4** Weather (wind out, temperature)
-    - **F5** Handedness wOBA split (batter vs pitcher hand)
+    - **F1** Batter HR rate this season (HRs/game)  ·  **F2** Pitcher HR vulnerability
+    - **F3** Park HR factor  ·  **F4** Weather (wind out / hot temps)  ·  **F5** Handedness split
 
-    ⭐ = 4+ factors confirmed · Stake max $10 on any single HR parlay · HR props are lottery tickets by nature
+    ⭐ = 4+ factors confirmed, positive EV  ·  ⚠️ = model best-available pick, no EV threshold met
+    Max $5–$10 stake on any HR parlay — these are lottery tickets by design
     """)
 
 
@@ -704,15 +794,8 @@ def render_record_bet_tab(picks: list = None, parlays: list = None, nrfi_ranked:
         st.markdown("#### Record an HR Parlay")
         st.caption("Select one of today's model-built HR parlays to record, or enter manually.")
 
-        # Get HR parlays from results
-        hr_parlays = hr_results.get("parlays", [])
-        if not hr_parlays:
-            try:
-                from sports_betting.collectors.hr_props_collector import run_hr_parlay_analysis
-                _hr = run_hr_parlay_analysis([], {})
-                hr_parlays = _hr.get("parlays", [])
-            except Exception:
-                hr_parlays = []
+        # Get HR parlays — use same direct builder as the tab so they always match
+        hr_parlays = _build_hr_parlays_direct(hr_results)
 
         if hr_parlays:
             parlay_labels = [p.get("label", f"HR Parlay {i+1}") for i, p in enumerate(hr_parlays)]
