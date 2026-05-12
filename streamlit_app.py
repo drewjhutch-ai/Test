@@ -575,33 +575,244 @@ def render_signals_tab():
     st.caption("Weights auto-adjust after every game cycle. Signals hitting >60% get boosted.")
 
 
-def render_record_bet_tab():
+def render_record_bet_tab(picks: list = None, parlays: list = None, nrfi_ranked: list = None):
     st.markdown("### 📝 Record a Bet You Placed")
-    st.markdown("Logging your actual bets teaches the model which signals work best for you.")
+    st.caption("Logging your actual bets teaches the model which signals work best over time.")
 
-    with st.form("record_bet"):
-        col1, col2 = st.columns(2)
-        with col1:
-            game_id  = st.text_input("Game (e.g. NYY-BOS or mlb_12345)")
-            market   = st.selectbox("Market", ["ml","f5_ml","k_over","er_under","nrfi","yrfi","run_line"])
-            price    = st.number_input("Price (American odds)", value=-130, step=5)
-        with col2:
-            side     = st.selectbox("Side", ["home","away","over","under"])
-            units    = st.selectbox("Units", [1, 2, 3])
-            signals  = st.text_input("Signals (comma-separated)", placeholder="era fraud, hot streak")
+    picks       = picks or []
+    parlays     = parlays or []
+    nrfi_ranked = nrfi_ranked or []
 
-        submitted = st.form_submit_button("✅ Record Bet", type="primary")
-        if submitted and game_id:
-            from sports_betting.analysis.signal_tracker import record_placed_bet
-            signal_list = [s.strip() for s in signals.split(",")] if signals else []
-            record_placed_bet(
-                game_id=game_id, book="draftkings",
-                market=market, side=side,
-                price=int(price), units=float(units),
-                signals_present=signal_list,
+    # Build game options from today's active picks
+    active_picks = [p for p in picks if p.tier != "SKIP"]
+    game_options = [
+        f"{_short(p.away_team)} @ {_short(p.home_team)}"
+        for p in active_picks
+    ]
+    # Add NRFI games not already in picks
+    nrfi_games = [g.get("game", "") for g in nrfi_ranked if g.get("game") not in game_options]
+    game_options = list(dict.fromkeys(game_options + nrfi_games))  # dedupe, preserve order
+    if not game_options:
+        game_options = ["No games loaded — run model first"]
+
+    # Map game → pick for auto-fill
+    pick_by_game = {
+        f"{_short(p.away_team)} @ {_short(p.home_team)}": p
+        for p in active_picks
+    }
+
+    from sports_betting.analysis.signal_tracker import record_placed_bet
+
+    # ── Bet type selector ──────────────────────────────────────────────
+    bet_type = st.radio(
+        "What are you recording?",
+        ["🎯 Single Bet", "🎰 Parlay"],
+        horizontal=True,
+    )
+    st.markdown("---")
+
+    # ── SINGLE BET ─────────────────────────────────────────────────────
+    if bet_type == "🎯 Single Bet":
+        with st.form("record_single_bet", clear_on_submit=True):
+            st.markdown("#### Single Bet Details")
+
+            col1, col2 = st.columns(2)
+            with col1:
+                selected_game = st.selectbox("Game", game_options)
+
+                # Auto-detect teams from game string
+                pick = pick_by_game.get(selected_game)
+                if pick:
+                    team_opts = [
+                        f"{_short(pick.backing_team)} (Model Pick ⭐)",
+                        _short(pick.home_team) if pick.backing_team != pick.home_team else _short(pick.away_team),
+                        "Over",
+                        "Under",
+                    ]
+                elif " @ " in selected_game:
+                    parts = selected_game.split(" @ ")
+                    team_opts = [parts[1].strip(), parts[0].strip(), "Over", "Under"]
+                else:
+                    team_opts = ["Home", "Away", "Over", "Under"]
+
+                side = st.selectbox("Bet On", team_opts)
+                # Strip the model tag if present
+                side_clean = side.replace(" (Model Pick ⭐)", "").strip()
+
+                market = st.selectbox("Market", [
+                    "Full Game ML", "F5 ML", "Run Line -1.5", "Run Line +1.5",
+                    "NRFI", "YRFI", "Game Over", "Game Under",
+                    "K Over", "K Under", "ERA Under",
+                ])
+
+            with col2:
+                # Auto-suggest price from model pick
+                default_price = -130
+                if pick:
+                    default_price = getattr(pick, "backing_price", -130) or -130
+                price = st.number_input("DraftKings Price (American odds)", value=int(default_price), step=5)
+
+                units = st.selectbox("Units", [0.5, 1, 1.5, 2, 3], index=1)
+                dollar_amount = units * UNIT_SIZE
+                st.caption(f"💵 Dollar amount: ${dollar_amount:.2f}")
+
+                book = st.selectbox("Book", ["DraftKings", "FanDuel", "BetMGM", "Caesars", "Other"])
+
+            # Auto-populate signals from model pick
+            default_signals = ""
+            if pick and pick.factors:
+                default_signals = ", ".join(pick.factors[:3])
+            signals = st.text_area(
+                "Signals / Reason (auto-filled from model — edit if needed)",
+                value=default_signals,
+                height=80,
             )
-            st.success(f"✅ Recorded: {side.upper()} {market} @ {int(price):+d} ({units}u / ${int(units)*UNIT_SIZE})")
-            st.caption("Result will be graded automatically after the game completes.")
+
+            submitted = st.form_submit_button("✅ Record Single Bet", type="primary", use_container_width=True)
+            if submitted and selected_game != "No games loaded — run model first":
+                signal_list = [s.strip() for s in signals.split(",")] if signals else []
+                game_id = selected_game.replace(" @ ", "-").replace(" ", "_")
+                record_placed_bet(
+                    game_id=game_id,
+                    book=book.lower().replace(" ", ""),
+                    market=market.lower().replace(" ", "_"),
+                    side=side_clean.lower(),
+                    price=int(price),
+                    units=float(units),
+                    signals_present=signal_list,
+                )
+                st.success(f"✅ Recorded: **{side_clean}** {market} @ {int(price):+d}  ·  {units}u / ${dollar_amount:.2f}")
+                st.caption("The model will grade this automatically after the game completes and update signal weights.")
+
+    # ── PARLAY BUILDER ─────────────────────────────────────────────────
+    else:
+        st.markdown("#### Build Your Parlay")
+        st.caption("Add each leg of your parlay below. Combined odds update automatically.")
+
+        # Let user choose how many legs
+        num_legs = st.selectbox("Number of Legs", [2, 3, 4, 5, 6], index=0)
+
+        legs_data = []
+        combined_decimal = 1.0
+        all_valid = True
+
+        for i in range(num_legs):
+            st.markdown(f"**Leg {i+1}**")
+            c1, c2, c3, c4 = st.columns([3, 2, 2, 2])
+            with c1:
+                game = st.selectbox(f"Game", game_options, key=f"pg_{i}")
+            with c2:
+                pick = pick_by_game.get(game)
+                if pick:
+                    t_opts = [
+                        f"{_short(pick.backing_team)} ⭐",
+                        _short(pick.home_team) if pick.backing_team != pick.home_team else _short(pick.away_team),
+                        "Over", "Under",
+                    ]
+                elif " @ " in game:
+                    parts = game.split(" @ ")
+                    t_opts = [parts[1].strip(), parts[0].strip(), "Over", "Under"]
+                else:
+                    t_opts = ["Home", "Away", "Over", "Under"]
+                side = st.selectbox("Side", t_opts, key=f"ps_{i}")
+            with c3:
+                mkt = st.selectbox("Market", [
+                    "Full Game ML", "F5 ML", "Run Line", "NRFI", "YRFI",
+                    "Game Over", "Game Under", "HR",
+                ], key=f"pm_{i}")
+            with c4:
+                default_p = -130
+                if pick:
+                    default_p = getattr(pick, "backing_price", -130) or -130
+                leg_price = st.number_input("Price", value=int(default_p), step=5, key=f"pp_{i}")
+
+            # Running combined odds
+            if leg_price > 0:
+                dec = leg_price / 100 + 1
+            else:
+                dec = 100 / abs(leg_price) + 1
+            combined_decimal *= dec
+            legs_data.append({
+                "game": game, "side": side.replace(" ⭐","").strip(),
+                "market": mkt, "price": int(leg_price),
+            })
+
+        # Show combined odds live
+        st.markdown("---")
+        if combined_decimal >= 2.0:
+            combined_american = int((combined_decimal - 1) * 100)
+        else:
+            combined_american = int(-100 / (combined_decimal - 1)) if combined_decimal > 1 else -9999
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Combined Odds", f"+{combined_american:,}" if combined_american > 0 else f"{combined_american:,}")
+
+        with st.form("record_parlay_bet", clear_on_submit=True):
+            col1, col2 = st.columns(2)
+            with col1:
+                parlay_stake = st.number_input("Stake ($)", value=10, min_value=1, step=5)
+                potential_win = round((combined_decimal - 1) * parlay_stake, 2)
+                st.caption(f"💵 Potential win: ${potential_win:,.2f} (total return ${potential_win + parlay_stake:,.2f})")
+            with col2:
+                parlay_book = st.selectbox("Book", ["DraftKings", "FanDuel", "BetMGM", "Caesars", "Other"])
+                parlay_label = st.text_input("Parlay name / note (optional)", placeholder="e.g. P2 Core 3-leg")
+
+            submitted_parlay = st.form_submit_button("✅ Record Parlay", type="primary", use_container_width=True)
+            if submitted_parlay:
+                # Record each leg as a linked parlay bet
+                parlay_id = f"parlay_{__import__('datetime').datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                for j, leg in enumerate(legs_data):
+                    game_id = leg["game"].replace(" @ ","-").replace(" ","_")
+                    record_placed_bet(
+                        game_id=f"{parlay_id}_leg{j+1}_{game_id}",
+                        book=parlay_book.lower().replace(" ",""),
+                        market=leg["market"].lower().replace(" ","_"),
+                        side=leg["side"].lower(),
+                        price=leg["price"],
+                        units=round(parlay_stake / UNIT_SIZE, 2),
+                        signals_present=[f"parlay:{parlay_id}", f"leg:{j+1}of{num_legs}"],
+                    )
+                st.success(
+                    f"✅ Recorded {num_legs}-leg parlay  ·  "
+                    f"Odds: {'+' if combined_american > 0 else ''}{combined_american:,}  ·  "
+                    f"Stake: ${parlay_stake}  ·  "
+                    f"To win: ${potential_win:,.2f}"
+                )
+                if parlay_label:
+                    st.caption(f"Label: {parlay_label}")
+
+    # ── Recent bets history ────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("#### 📋 Recent Recorded Bets")
+    try:
+        from sports_betting.database import get_db
+        with get_db() as conn:
+            rows = conn.execute("""
+                SELECT game_id, market, side, price, units, result, created_at
+                FROM value_bets
+                ORDER BY created_at DESC
+                LIMIT 15
+            """).fetchall()
+        if rows:
+            hist = []
+            for r in rows:
+                result_str = r[5] or "Pending"
+                color = "🟢" if result_str == "WIN" else "🔴" if result_str == "LOSS" else "⏳"
+                hist.append({
+                    "":       color,
+                    "Game":   str(r[0])[:25],
+                    "Market": r[1] or "?",
+                    "Side":   r[2] or "?",
+                    "Price":  f"{r[3]:+d}" if r[3] else "?",
+                    "Units":  r[4],
+                    "Result": result_str,
+                    "Date":   str(r[6])[:10] if r[6] else "?",
+                })
+            st.dataframe(pd.DataFrame(hist), hide_index=True, use_container_width=True)
+        else:
+            st.caption("No bets recorded yet. Your history will appear here.")
+    except Exception:
+        st.caption("Bet history unavailable.")
 
 
 # ── App entry point ───────────────────────────────────────────────────
@@ -662,7 +873,7 @@ def main():
     with tabs[4]: render_intelligence_tab(all_signals, xwoba_luck, picks)
     with tabs[5]: render_skipped_tab(skipped)
     with tabs[6]: render_signals_tab()
-    with tabs[7]: render_record_bet_tab()
+    with tabs[7]: render_record_bet_tab(picks, parlays, nrfi_ranked)
 
     # Sharp money alerts
     if sharp_plays:
