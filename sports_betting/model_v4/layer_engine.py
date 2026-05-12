@@ -32,6 +32,12 @@ class PitcherProfile:
     kbb_ratio: float = 0.0
     barrel_rate: float = 0.08
     swstr_pct: float = 0.10
+    hard_hit_rate: float = 0.37    # Hard hit % allowed
+    hr_fb_rate: float = 0.13       # HR/FB rate allowed
+    fly_ball_pct: float = 0.35     # Fly ball % allowed
+    gb_pct: float = 0.45           # Ground ball % allowed
+    avg_exit_velo: float = 88.5    # Avg exit velocity allowed
+    ip_per_start: float = 5.5      # Average innings per start
     last_5_era: float | None = None
     is_debut: bool = False
     is_il_return: bool = False
@@ -53,6 +59,11 @@ class TeamProfile:
     wrc_plus_14d: int = 100
     series_wins: int = 0   # Wins in current series (negative = losses)
     momentum: int = 0      # +N win streak, -N loss streak
+    avg_barrel_rate: float = 0.08   # Team avg barrel rate vs pitching
+    avg_hard_hit_rate: float = 0.37 # Team avg hard hit rate
+    avg_launch_angle: float = 12.0  # Team avg launch angle
+    ops_last_14d: float = 0.720     # Team OPS last 14 days
+    k_rate: float = 0.23            # Team strikeout rate (as batters)
 
 
 @dataclass
@@ -173,6 +184,18 @@ def layer_2_cps(pick: PickCandidate) -> LayerOutput:
             adj -= 0.25
         if p.swstr_pct > 0.15:
             adj -= 0.30
+        if p.hard_hit_rate > 0.40:
+            base += 0.15  # High hard contact allowed — ERA will regress up
+        elif p.hard_hit_rate < 0.32:
+            base -= 0.15  # Elite soft contact — ERA should outperform
+        if p.fly_ball_pct > 0.42:
+            base += 0.10  # Fly ball pitcher in HR-friendly park = elevated risk
+        elif p.gb_pct > 0.52:
+            base -= 0.10  # Ground ball pitcher limits HR damage
+        if p.hr_fb_rate > 0.16:
+            base += 0.12  # High HR/FB rate — homer-prone
+        elif p.hr_fb_rate < 0.08:
+            base -= 0.10  # Low HR/FB rate — suppresses long ball
         return round(base + adj, 3)
 
     cps_home = compute_cps(pick.home_pitcher)
@@ -463,38 +486,42 @@ def layer_8_bet_type(pick: PickCandidate) -> LayerOutput:
     """Select the optimal market based on all prior layers."""
     out = LayerOutput(8, "Bet Type Selection", passed=True)
     tp = pick.backing_team_profile
+    opp_tp = pick.away_team_profile if pick.backing_team == pick.home_team else pick.home_team_profile
     total = max(1, tp.wins + tp.losses)
     win_pct = tp.wins / total
     r5 = tp.runs_per_game_last_5
     k9 = pick.backing_pitcher.k9
-    home_sp = pick.home_pitcher
-    away_sp = pick.away_pitcher
+    opp_k9 = pick.opposing_pitcher.k9
+    sp = pick.backing_pitcher
+    opp_sp = pick.opposing_pitcher
+    wx = pick.weather
 
     recommended = pick.proposed_market
+    additional_markets: list[str] = []
 
     # On backs list — use its preferred market
-    on_backs, backs_data = is_on_backs_list(pick.backing_pitcher.name)
+    on_backs, backs_data = is_on_backs_list(sp.name)
     if on_backs and backs_data.get("preferred_market"):
         recommended = backs_data["preferred_market"]
-        out.notes.append(f"Permanent backs: {pick.backing_pitcher.name} → {recommended}")
+        out.notes.append(f"Permanent backs: {sp.name} → {recommended}")
 
     # Elite pitcher on winning team
     elif win_pct >= 0.520 and r5 >= 4.0 and pick.cps_gap >= 1.50:
         recommended = "Full-game ML"
         out.notes.append(f"Elite pitcher + winning team → Full-game ML")
 
-    # Elite pitcher on losing team
+    # Elite pitcher on losing team — isolate pitcher
     elif win_pct < 0.500 and pick.cps_gap >= 1.50:
         recommended = "F5 ML"
         out.notes.append(f"Elite pitcher + sub-.500 team → F5 ML (isolates pitcher quality)")
 
-    # High K rate
+    # High K rate — strikeout prop
     elif k9 >= 9.5:
-        expected_ks = k9 / 9 * 6  # Assuming 6 innings
+        expected_ks = round(k9 / 9 * min(sp.ip_per_start, 6), 1)
         out.notes.append(
-            f"K/9 = {k9:.1f} → K Over prop. Expected ~{expected_ks:.1f} Ks in 6 IP."
+            f"K/9 = {k9:.1f} → K Over prop. Expected ~{expected_ks} Ks in {min(sp.ip_per_start,6):.0f} IP."
         )
-        recommended = "K Over prop"
+        recommended = f"K Over prop ({expected_ks})"
 
     # ERA fraud fade
     fraud = is_era_fraud(
@@ -503,12 +530,73 @@ def layer_8_bet_type(pick: PickCandidate) -> LayerOutput:
         pick.opposing_pitcher.fip,
         pick.opposing_pitcher.siera,
     )
-    if fraud["is_fraud"] and recommended not in ("K Over prop",):
+    if fraud["is_fraud"] and recommended not in (f"K Over prop ({round(k9/9*min(sp.ip_per_start,6),1)})",):
         recommended = "Opponent ML or F5 ML (ERA fraud fade)"
         out.notes.append("ERA fraud confirmed on opposing pitcher → back the opponent.")
 
+    # ── Additional market flags (layered on top of primary pick) ─────────
+    # F5 ML as alternative when starter going deep with good CPS gap
+    if pick.cps_gap >= 1.0 and sp.ip_per_start >= 5.5 and recommended not in ("F5 ML",):
+        additional_markets.append("F5 ML")
+        out.notes.append(f"CPS gap {pick.cps_gap:.2f} + avg {sp.ip_per_start:.1f} IP/start → F5 ML viable")
+
+    # Game OVER lean
+    from .park_database import get_run_factor
+    run_factor = get_run_factor(pick.home_team)
+    both_era_avg = (sp.era + opp_sp.era) / 2
+    over_signals = []
+    if run_factor >= 1.08:
+        over_signals.append(f"HR park ({run_factor:.2f}x)")
+    if wx.wind_speed >= 10 and wx.wind_direction == "out":
+        over_signals.append(f"Wind {wx.wind_speed:.0f}mph out")
+    if wx.temperature >= 82:
+        over_signals.append(f"Hot ({wx.temperature:.0f}°F)")
+    if both_era_avg >= 4.80:
+        over_signals.append(f"Both SPs ERA avg {both_era_avg:.2f}")
+    if sp.fly_ball_pct >= 0.40 or opp_sp.fly_ball_pct >= 0.40:
+        over_signals.append("Fly ball SP in hitter park")
+    if len(over_signals) >= 3:
+        additional_markets.append(f"Game OVER ({', '.join(over_signals[:3])})")
+        out.notes.append(f"OVER lean: {' | '.join(over_signals)}")
+
+    # Game UNDER lean
+    under_signals = []
+    if run_factor <= 0.93:
+        under_signals.append(f"Pitcher park ({run_factor:.2f}x)")
+    if wx.is_dome:
+        under_signals.append("Dome — no weather variance")
+    if both_era_avg <= 3.60:
+        under_signals.append(f"Both SPs ERA avg {both_era_avg:.2f} (elite)")
+    if sp.k9 >= 9.0 and opp_k9 >= 9.0:
+        under_signals.append(f"Both SPs K/9 {sp.k9:.1f}/{opp_k9:.1f} (high Ks = fewer baserunners)")
+    if sp.gb_pct >= 0.50 and opp_sp.gb_pct >= 0.50:
+        under_signals.append("Both SPs groundball heavy")
+    if len(under_signals) >= 3:
+        additional_markets.append(f"Game UNDER ({', '.join(under_signals[:3])})")
+        out.notes.append(f"UNDER lean: {' | '.join(under_signals)}")
+
+    # Pitcher outs recorded prop (when starter goes deep consistently)
+    if sp.ip_per_start >= 6.0 and sp.era <= 3.80:
+        outs_line = round(sp.ip_per_start * 3 - 0.5)
+        additional_markets.append(f"Outs Recorded Over {outs_line}")
+        out.notes.append(f"{sp.name} avg {sp.ip_per_start:.1f} IP → Outs Over {outs_line}")
+
+    # Pitcher ERA / ER Under when elite
+    if sp.xfip <= 3.20 and sp.siera <= 3.20:
+        er_line = max(1, round(sp.era * sp.ip_per_start / 9))
+        additional_markets.append(f"Earned Runs Under {er_line + 0.5}")
+        out.notes.append(f"{sp.name} xFIP {sp.xfip:.2f}/SIERA {sp.siera:.2f} → ER Under")
+
+    # First 5 NRFI / early-game prop when both starters are elite
+    if sp.era <= 3.00 and opp_sp.era <= 3.50:
+        additional_markets.append("F5 UNDER / NRFI")
+        out.notes.append(f"Elite dual-starter matchup → F5 UNDER / NRFI")
+
     pick.recommended_market = recommended
     out.data["recommended_market"] = recommended
+    out.data["additional_markets"] = additional_markets
+    if additional_markets:
+        out.notes.append(f"Also consider: {' · '.join(additional_markets[:4])}")
     return out
 
 

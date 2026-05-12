@@ -19,16 +19,13 @@ PARLAY_TEMPLATES = {
     "P5": {"legs": 6, "max_lose_pct": 0.45, "stake_range": (5, 5),   "target_ev": 0.00, "label": "Moonshot"},
 }
 
-# Confirmed busting structures — never build these
+# Hard-banned structures (statistical death traps regardless of price)
 BUSTED_STRUCTURES = [
-    "game_total",
-    "over",
-    "under",
-    "laa_ml",
-    "sweep_g3",
-    "debut_k_prop",
-    "same_series_2loss",
+    "debut_k_prop",      # K props on debut pitchers — sample size zero
+    "same_series_2loss", # Chasing a team that lost 2 in same series
 ]
+# NOTE: Totals (over/under) and LAA ML removed from ban list.
+# Model will include them when statistical evidence is strong.
 
 
 @dataclass
