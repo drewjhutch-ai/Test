@@ -52,7 +52,7 @@ def get_team_standings() -> list[dict]:
                     "team_name": team["name"],
                     "wins": team["w"],
                     "losses": team["l"],
-                    "pct": float(team["pct"]),
+                    "pct": float(team.get("pct") or 0),
                     "gb": team["gb"],
                     "streak": team.get("streak", ""),
                     "last10": team.get("last10", ""),
@@ -131,7 +131,7 @@ def get_last_n_games(team_id: int, n: int = 10) -> list[dict]:
         schedule = statsapi.schedule(
             start_date=start_date.strftime("%Y-%m-%d"),
             end_date=end_date.strftime("%Y-%m-%d"),
-            teamId=team_id,
+            team=team_id,
         )
         completed = [g for g in schedule if g.get("status") == "Final"]
         return completed[-n:]

@@ -419,7 +419,7 @@ def render_parlays_tab(parlays: list, nrfi_parlay: dict | None):
                 "Win %":   f"{leg.true_prob:.0%}",
                 "Lose %":  f"{leg.lose_pct:.0%}",
             })
-        st.dataframe(pd.DataFrame(leg_rows), hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(leg_rows), hide_index=True, width='stretch')
 
         note = html_lib.escape(parlay.independence_notes[0] if parlay.independence_notes else "")
         nc = "#10b981" if "PASS" in note else "#f59e0b"
@@ -442,7 +442,7 @@ def render_parlays_tab(parlays: list, nrfi_parlay: dict | None):
         legs = nrfi_parlay.get("legs", [])
         if legs:
             rows = [{"Game": g.get("game","?"), "NRFI %": f"{g.get('nrfi_probability',0):.1%}", "Tier": g.get("tier","?")} for g in legs]
-            st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(rows), hide_index=True, width='stretch')
 
 
 def render_nrfi_tab(nrfi_ranked: list, nrfi_parlay: dict | None = None):
@@ -506,7 +506,7 @@ def render_nrfi_tab(nrfi_ranked: list, nrfi_parlay: dict | None = None):
             prows = [{"Game": g.get("game","?"), "NRFI %": f"{g.get('nrfi_probability',0):.1%}",
                       "SP (Home)": g.get("home_pitcher","?"), "SP (Away)": g.get("away_pitcher","?")}
                      for g in legs]
-            st.dataframe(pd.DataFrame(prows), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(prows), hide_index=True, width='stretch')
             st.caption("Stake recommendation: $10 for 3-leg · $7 for 4-leg · $5 for 5-leg")
             break  # show only the best size
         st.markdown("---")
@@ -530,7 +530,7 @@ def render_nrfi_tab(nrfi_ranked: list, nrfi_parlay: dict | None = None):
             "Tier":         g.get("tier", "?"),
         })
 
-    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width='stretch')
 
     st.markdown("""
     **Guide** · ✅ Parlay eligible = 70%+ · 🏟️ Dome = most reliable · ❄️ Cold = NRFI lean · 💨 Wind in = NRFI lean
@@ -622,7 +622,7 @@ def render_intelligence_tab(all_signals: dict, xwoba_luck: dict, games: list, sh
                     "Status": data.get("label","?").upper(),
                 })
         if rows:
-            st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(rows), hide_index=True, width='stretch')
 
     # Sharp money signals
     if sharp_plays:
@@ -775,7 +775,7 @@ def render_hr_parlay_tab(hr_results: dict):
                 "Hard Hit":   f"{leg.get('hard_hit_rate', 0):.1%}",
                 "Book":       leg.get("book", "DK"),
             })
-        st.dataframe(pd.DataFrame(leg_rows), hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(leg_rows), hide_index=True, width='stretch')
         st.markdown("---")
 
     # Ranked candidates table
@@ -794,7 +794,7 @@ def render_hr_parlay_tab(hr_results: dict):
                     "Factors":c.get("factors_passed", 0),
                     "Rec":    c.get("recommendation", "?"),
                 })
-            st.dataframe(pd.DataFrame(c_rows), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(c_rows), hide_index=True, width='stretch')
 
     st.markdown("""
     **HR Factor Scoring**
@@ -881,7 +881,7 @@ def render_signals_tab():
             status = "✅ Boosted" if win_rate >= 0.60 else ("⚠️ Penalized" if win_rate < 0.48 else "→ Neutral")
             mkt_rows.append({"Market": mkt, "Win Rate": f"{win_rate:.1%}", "Status": status})
         if mkt_rows:
-            st.dataframe(pd.DataFrame(mkt_rows), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(mkt_rows), hide_index=True, width='stretch')
 
     # Factor performance
     factor_weights = weights.get("factors", {})
@@ -892,7 +892,7 @@ def render_signals_tab():
             status = "🔥 Elite" if mult >= 1.3 else ("✅ Strong" if mult >= 1.1 else ("⚠️ Weak" if mult < 0.9 else "→ Neutral"))
             f_rows.append({"Factor Signal": fk.replace("_", " ").title(), "Weight": f"x{mult:.2f}", "Status": status})
         if f_rows:
-            st.dataframe(pd.DataFrame(f_rows), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(f_rows), hide_index=True, width='stretch')
 
     # Legacy signal tracker
     st.markdown("#### Signal Hit Rates (All Time)")
@@ -911,7 +911,7 @@ def render_signals_tab():
                 "Status":   "↑ Boosted" if w > 1.05 else "↓ Penalized" if w < 0.95 else "→ Neutral",
             })
         df = pd.DataFrame(rows)
-        st.dataframe(df, hide_index=True, use_container_width=True,
+        st.dataframe(df, hide_index=True, width='stretch',
             column_config={
                 "Hit Rate": st.column_config.ProgressColumn("Hit Rate", min_value=0, max_value=1, format="%.1%"),
                 "Weight": st.column_config.NumberColumn("Weight", format="%.3f"),

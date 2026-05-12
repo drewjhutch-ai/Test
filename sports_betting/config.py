@@ -48,6 +48,7 @@ MLB_STADIUMS = {
     "Los Angeles Angels": {"lat": 33.8003, "lon": -117.8827, "name": "Angel Stadium", "roof": False},
     "San Francisco Giants": {"lat": 37.7786, "lon": -122.3893, "name": "Oracle Park", "roof": False},
     "Oakland Athletics": {"lat": 37.7516, "lon": -122.2005, "name": "Oakland Coliseum", "roof": False},
+    "Athletics":         {"lat": 38.5799, "lon": -121.5026, "name": "Sutter Health Park", "roof": False},
     "Seattle Mariners": {"lat": 47.5914, "lon": -122.3325, "name": "T-Mobile Park", "roof": True},
     "Houston Astros": {"lat": 29.7573, "lon": -95.3555, "name": "Minute Maid Park", "roof": True},
     "Texas Rangers": {"lat": 32.7473, "lon": -97.0822, "name": "Globe Life Field", "roof": True},
