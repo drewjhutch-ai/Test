@@ -1236,114 +1236,207 @@ def render_record_bet_tab(picks: list = None, parlays: list = None, nrfi_ranked:
                 if parlay_label:
                     st.caption(f"Label: {parlay_label}")
 
-    # ── Recent bets history (grouped parlays) ─────────────────────────
+    # ── Bet history (My Bets + Model Picks) ───────────────────────────
     st.markdown("---")
-    st.markdown("""
-    <div style="color:#f1f5f9;font-size:15px;font-weight:700;margin-bottom:12px">📋 Recent Bet History</div>
-    """, unsafe_allow_html=True)
     try:
         from sports_betting.database import get_db
         import json as _json
-        with get_db() as conn:
-            rows = conn.execute("""
-                SELECT game_id, market, side, book_price, recommended_bet, result, detected_at, factors
-                FROM value_bets
-                WHERE confidence = 'PLACED'
-                ORDER BY detected_at DESC
-                LIMIT 40
-            """).fetchall()
 
-        if not rows:
-            st.markdown('<div style="color:#475569;font-size:13px;padding:16px 0">No bets recorded yet — submit a bet above to start tracking.</div>', unsafe_allow_html=True)
-        else:
-            # Parse parlay_id from factors JSON to group legs
-            def _parse_parlay_id(factors_str):
-                try:
-                    fs = _json.loads(factors_str or "[]")
-                    for f in fs:
-                        if str(f).startswith("parlay:"):
-                            return str(f).replace("parlay:", "")
-                except Exception:
-                    pass
-                return None
+        hist_tab_my, hist_tab_model = st.tabs(["📋 My Bets", "🤖 Model Picks"])
 
-            # Group rows: singles stay flat, parlay legs grouped by parlay_id
-            groups = {}   # parlay_id → list of rows
-            singles = []
-            for r in rows:
-                pid = _parse_parlay_id(r[7])
-                if pid:
-                    groups.setdefault(pid, []).append(r)
-                else:
-                    singles.append(r)
+        # ── My Bets (manually recorded) ──────────────────────────────
+        with hist_tab_my:
+            with get_db() as conn:
+                rows = conn.execute("""
+                    SELECT game_id, market, side, book_price, recommended_bet, result, detected_at, factors
+                    FROM value_bets
+                    WHERE confidence = 'PLACED'
+                    ORDER BY detected_at DESC LIMIT 40
+                """).fetchall()
 
-            def _result_badge(res):
-                if res == "WIN":   return "🟢", "#10b981"
-                if res == "LOSS":  return "🔴", "#ef4444"
-                return "⏳", "#94a3b8"
+            if not rows:
+                st.caption("No bets recorded yet — submit a bet above to start tracking.")
+            else:
+                def _parse_parlay_id(factors_str):
+                    try:
+                        for f in _json.loads(factors_str or "[]"):
+                            if str(f).startswith("parlay:"):
+                                return str(f).replace("parlay:", "")
+                    except Exception:
+                        pass
+                    return None
 
-            # Render parlay groups first (most recent first by first leg date)
-            for pid, legs in groups.items():
-                leg_count = len(legs)
-                date_str_h = str(legs[0][6])[:10] if legs[0][6] else "?"
-                results = [r[5] for r in legs]
-                if all(r == "WIN" for r in results):
-                    group_icon, group_color = "🟢", "#10b981"
-                elif any(r == "LOSS" for r in results):
-                    group_icon, group_color = "🔴", "#ef4444"
-                else:
-                    group_icon, group_color = "⏳", "#94a3b8"
+                def _result_badge(res):
+                    if res == "WIN":  return "🟢", "#10b981"
+                    if res == "LOSS": return "🔴", "#ef4444"
+                    return "⏳", "#94a3b8"
 
-                st.markdown(f"""
-                <div style="background:#111827;border:1px solid #1e293b;border-left:3px solid #8b5cf6;
-                            border-radius:10px;padding:14px 18px;margin-bottom:10px">
-                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-                        <div style="display:flex;align-items:center;gap:8px">
-                            <span style="font-size:16px">{group_icon}</span>
-                            <span style="color:#8b5cf6;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em">🎰 {leg_count}-Leg Parlay</span>
-                            <span style="color:#475569;font-size:11px">{date_str_h}</span>
-                        </div>
-                        <span style="color:{group_color};font-size:12px;font-weight:600">{'All Win' if group_icon=='🟢' else 'Loss' if group_icon=='🔴' else 'Pending'}</span>
-                    </div>
-                """, unsafe_allow_html=True)
+                groups, singles = {}, []
+                for r in rows:
+                    pid = _parse_parlay_id(r[7])
+                    if pid:
+                        groups.setdefault(pid, []).append(r)
+                    else:
+                        singles.append(r)
 
-                for leg_row in legs:
-                    r_icon, r_color = _result_badge(leg_row[5])
-                    side = str(leg_row[2]).upper()[:12] if leg_row[2] else "?"
-                    mkt  = str(leg_row[1])[:18] if leg_row[1] else "?"
-                    price = f"{int(leg_row[3]):+d}" if leg_row[3] else "?"
+                for pid, legs in groups.items():
+                    date_h = str(legs[0][6])[:10] if legs[0][6] else "?"
+                    results = [r[5] for r in legs]
+                    if all(r == "WIN" for r in results):  g_icon, g_color = "🟢", "#10b981"
+                    elif any(r == "LOSS" for r in results): g_icon, g_color = "🔴", "#ef4444"
+                    else:                                  g_icon, g_color = "⏳", "#94a3b8"
+                    with st.container():
+                        st.markdown(f"""
+                        <div style="background:#111827;border:1px solid #1e293b;border-left:3px solid #8b5cf6;border-radius:10px;padding:14px 18px;margin-bottom:10px">
+                            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+                                <span style="color:#8b5cf6;font-size:11px;font-weight:700;text-transform:uppercase">{g_icon} {len(legs)}-Leg Parlay · {date_h}</span>
+                                <span style="color:{g_color};font-size:12px;font-weight:600">{'All Win' if g_icon=='🟢' else 'Loss' if g_icon=='🔴' else 'Pending'}</span>
+                            </div>""", unsafe_allow_html=True)
+                        for leg_row in legs:
+                            r_icon, _ = _result_badge(leg_row[5])
+                            side_  = str(leg_row[2]).upper()[:14] if leg_row[2] else "?"
+                            mkt_   = str(leg_row[1])[:20] if leg_row[1] else "?"
+                            price_ = f"{int(leg_row[3]):+d}" if leg_row[3] else "?"
+                            st.markdown(f"""<div style="display:flex;gap:10px;padding:4px 0;border-top:1px solid #1e293b">
+                                <span>{r_icon}</span><span style="color:#f1f5f9;font-size:13px;min-width:90px">{side_}</span>
+                                <span style="color:#64748b;font-size:12px;min-width:110px">{mkt_}</span>
+                                <span style="color:#f59e0b;font-size:12px">{price_}</span></div>""", unsafe_allow_html=True)
+                        st.markdown("</div>", unsafe_allow_html=True)
+
+                for r in singles:
+                    r_icon, r_color = _result_badge(r[5])
+                    side_  = str(r[2]).upper()[:16] if r[2] else "?"
+                    mkt_   = str(r[1])[:20] if r[1] else "?"
+                    price_ = f"{int(r[3]):+d}" if r[3] else "?"
+                    stake_ = f"${r[4]:.0f}" if r[4] else "?"
+                    date_h = str(r[6])[:10] if r[6] else "?"
                     st.markdown(f"""
-                    <div style="display:flex;align-items:center;gap:10px;padding:5px 0;
-                                border-top:1px solid #1e293b">
-                        <span style="font-size:13px">{r_icon}</span>
-                        <span style="color:#f1f5f9;font-size:13px;font-weight:600;min-width:80px">{side}</span>
-                        <span style="color:#64748b;font-size:12px;min-width:100px">{mkt}</span>
-                        <span style="color:#f59e0b;font-size:12px">{price}</span>
-                    </div>
-                    """, unsafe_allow_html=True)
-                st.markdown("</div>", unsafe_allow_html=True)
+                    <div style="background:#111827;border:1px solid #1e293b;border-left:3px solid #3b82f6;border-radius:10px;padding:12px 18px;margin-bottom:8px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+                        <span>{r_icon}</span>
+                        <span style="color:#f1f5f9;font-size:14px;font-weight:700;min-width:80px">{side_}</span>
+                        <span style="color:#64748b;font-size:13px;min-width:110px">{mkt_}</span>
+                        <span style="color:#f59e0b;font-size:13px;min-width:55px">{price_}</span>
+                        <span style="color:#94a3b8;font-size:12px">{stake_}</span>
+                        <span style="color:{r_color};font-size:12px;font-weight:600;margin-left:auto">{r[5] or 'Pending'}</span>
+                        <span style="color:#334155;font-size:11px">{date_h}</span>
+                    </div>""", unsafe_allow_html=True)
 
-            # Render single bets
-            for r in singles:
-                r_icon, r_color = _result_badge(r[5])
-                side   = str(r[2]).upper()[:16] if r[2] else "?"
-                mkt    = str(r[1])[:20] if r[1] else "?"
-                price  = f"{int(r[3]):+d}" if r[3] else "?"
-                stake  = f"${r[4]:.2f}" if r[4] else "?"
-                date_h = str(r[6])[:10] if r[6] else "?"
-                st.markdown(f"""
-                <div style="background:#111827;border:1px solid #1e293b;border-left:3px solid #3b82f6;
-                            border-radius:10px;padding:12px 18px;margin-bottom:8px;
-                            display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-                    <span style="font-size:16px">{r_icon}</span>
-                    <span style="color:#f1f5f9;font-size:14px;font-weight:700;min-width:80px">{side}</span>
-                    <span style="color:#64748b;font-size:13px;min-width:110px">{mkt}</span>
-                    <span style="color:#f59e0b;font-size:13px;min-width:55px">{price}</span>
-                    <span style="color:#94a3b8;font-size:12px">{stake}</span>
-                    <span style="color:{r_color};font-size:12px;font-weight:600;margin-left:auto">{r[5] or 'Pending'}</span>
-                    <span style="color:#334155;font-size:11px">{date_h}</span>
-                </div>
-                """, unsafe_allow_html=True)
+        # ── Model Picks (auto-tracked) ────────────────────────────────
+        with hist_tab_model:
+            with get_db() as conn:
+                model_rows = conn.execute("""
+                    SELECT game_id, market, side, book_price, model_probability,
+                           edge, result, detected_at, factors, confidence
+                    FROM value_bets
+                    WHERE confidence IN ('MODEL_PICK', 'MODEL_PARLAY')
+                    ORDER BY detected_at DESC LIMIT 200
+                """).fetchall()
+
+            if not model_rows:
+                st.info("No model picks tracked yet — run the model to start auto-tracking picks and parlays.")
+            else:
+                # Performance summary
+                graded    = [r for r in model_rows if r[6] in ("WIN", "LOSS")]
+                wins      = sum(1 for r in graded if r[6] == "WIN")
+                losses    = len(graded) - wins
+                pending   = len(model_rows) - len(graded)
+                win_rate  = wins / len(graded) if graded else 0.0
+
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Total Picks", len(model_rows))
+                c2.metric("Win Rate", f"{win_rate:.0%}" if graded else "—", f"{wins}W / {losses}L" if graded else None)
+                c3.metric("Graded", len(graded))
+                c4.metric("Pending", pending)
+
+                st.markdown("---")
+
+                # Separate single picks and parlay legs
+                single_picks, parlay_legs = [], []
+                for r in model_rows:
+                    if r[9] == "MODEL_PICK":
+                        single_picks.append(r)
+                    else:
+                        parlay_legs.append(r)
+
+                # --- Single picks ---
+                if single_picks:
+                    st.markdown("#### 🎯 Single Picks")
+                    tier_colors_hist = {"STRONG": "#ef4444", "MEDIUM": "#f59e0b", "LEAN": "#94a3b8"}
+                    for r in single_picks:
+                        result    = r[6]
+                        r_icon    = "🟢" if result == "WIN" else "🔴" if result == "LOSS" else "⏳"
+                        r_color   = "#10b981" if result == "WIN" else "#ef4444" if result == "LOSS" else "#94a3b8"
+                        side_     = html_lib.escape(str(r[2]).title()[:20]) if r[2] else "?"
+                        mkt_      = html_lib.escape(str(r[1])[:22]) if r[1] else "?"
+                        date_h    = str(r[7])[:10] if r[7] else "?"
+                        ev_       = f"{float(r[5])*100:+.1f}%" if r[5] else "—"
+                        # Parse tier from factors
+                        tier = "LEAN"
+                        try:
+                            for f in _json.loads(r[8] or "[]"):
+                                if str(f).upper() in ("STRONG", "MEDIUM", "LEAN"):
+                                    tier = str(f).upper(); break
+                        except Exception:
+                            pass
+                        tc = tier_colors_hist.get(tier, "#94a3b8")
+                        st.html(f"""
+                        <div style="background:#111827;border:1px solid #1e293b;border-left:3px solid {tc};border-radius:10px;padding:12px 18px;margin-bottom:8px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+                            <span style="font-size:15px">{r_icon}</span>
+                            <span style="background:{tc}22;color:{tc};font-size:10px;font-weight:700;padding:2px 8px;border-radius:999px">{tier}</span>
+                            <span style="color:#f1f5f9;font-size:14px;font-weight:700;min-width:80px">{side_}</span>
+                            <span style="color:#64748b;font-size:12px;min-width:110px">{mkt_}</span>
+                            <span style="color:#f59e0b;font-size:12px;min-width:50px">EV {ev_}</span>
+                            <span style="color:{r_color};font-size:12px;font-weight:600;margin-left:auto">{result or 'Pending'}</span>
+                            <span style="color:#334155;font-size:11px">{date_h}</span>
+                        </div>""")
+
+                # --- Parlay legs grouped by parlay label ---
+                if parlay_legs:
+                    st.markdown("#### 🎰 Parlay History")
+                    parlay_groups: dict[str, list] = {}
+                    for r in parlay_legs:
+                        label = "Unknown"
+                        try:
+                            for f in _json.loads(r[8] or "[]"):
+                                if str(f).startswith("parlay:"):
+                                    label = str(f).replace("parlay:", ""); break
+                        except Exception:
+                            pass
+                        parlay_groups.setdefault(label, []).append(r)
+
+                    for plabel, legs in parlay_groups.items():
+                        date_h    = str(legs[0][7])[:10] if legs[0][7] else "?"
+                        p_results = [r[6] for r in legs]
+                        if all(r == "WIN" for r in p_results):  g_icon, g_color, g_label = "🟢", "#10b981", "All Win"
+                        elif any(r == "LOSS" for r in p_results): g_icon, g_color, g_label = "🔴", "#ef4444", "Loss"
+                        else:                                     g_icon, g_color, g_label = "⏳", "#94a3b8", "Pending"
+                        short_label = plabel.split("_")[1] if "_" in plabel else plabel
+                        leg_rows_html = ""
+                        for r in legs:
+                            icon = "🟢" if r[6] == "WIN" else ("🔴" if r[6] == "LOSS" else "⏳")
+                            res_color = "#10b981" if r[6] == "WIN" else ("#ef4444" if r[6] == "LOSS" else "#94a3b8")
+                            side_e = html_lib.escape(str(r[2]).title()[:18]) if r[2] else "?"
+                            mkt_e  = html_lib.escape(str(r[1])[:20]) if r[1] else "?"
+                            res_e  = html_lib.escape(r[6] or "Pending")
+                            leg_rows_html += (
+                                f'<div style="display:flex;gap:10px;padding:4px 0;border-top:1px solid #1e293b">'
+                                f'<span>{icon}</span>'
+                                f'<span style="color:#f1f5f9;font-size:13px;min-width:90px">{side_e}</span>'
+                                f'<span style="color:#64748b;font-size:12px">{mkt_e}</span>'
+                                f'<span style="color:{res_color};font-size:12px;margin-left:auto">{res_e}</span>'
+                                f'</div>'
+                            )
+                        with st.container():
+                            st.html(
+                                f'<div style="background:#111827;border:1px solid #1e293b;border-left:3px solid #8b5cf6;border-radius:10px;padding:14px 18px;margin-bottom:10px">'
+                                f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">'
+                                f'<span style="color:#8b5cf6;font-size:11px;font-weight:700;text-transform:uppercase">{g_icon} {short_label} · {len(legs)}-leg · {date_h}</span>'
+                                f'<span style="color:{g_color};font-size:12px;font-weight:600">{g_label}</span>'
+                                f'</div>'
+                                f'{leg_rows_html}'
+                                f'</div>'
+                            )
+
     except Exception as e:
         st.caption(f"Bet history unavailable: {e}")
 
