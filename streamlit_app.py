@@ -1847,6 +1847,126 @@ def render_record_bet_tab(picks: list = None, parlays: list = None, nrfi_ranked:
         st.caption(f"Bet history unavailable: {e}")
 
 
+# ── Ask AI tab ────────────────────────────────────────────────────────
+
+def _build_picks_context(picks: list, parlays: list) -> str:
+    """Summarise today's picks into a compact text block for the AI system prompt."""
+    lines = [f"Today's date: {datetime.now().strftime('%A, %B %d, %Y')}", ""]
+    tier_order = {"STRONG": 0, "MEDIUM": 1, "LEAN": 2}
+    active = sorted(
+        [p for p in picks if getattr(p, "tier", "SKIP") != "SKIP"],
+        key=lambda p: (tier_order.get(p.tier, 9), -(p.factor_count or 0)),
+    )
+    if active:
+        lines.append("=== TODAY'S MODEL PICKS ===")
+        for p in active:
+            mkt = _format_market(getattr(p, "recommended_market", "") or getattr(p, "proposed_market", ""), p)
+            ev = getattr(p, "ev_pct", 0) or 0
+            factors = getattr(p, "factors", []) or []
+            lines.append(
+                f"[{p.tier}] {p.backing_team} — {mkt} | EV: {ev:+.1f}% | "
+                f"Factors: {', '.join(str(f) for f in factors[:5])}"
+            )
+    else:
+        lines.append("No active picks today.")
+
+    lines.append("")
+    if parlays:
+        lines.append("=== TODAY'S PARLAYS ===")
+        for i, par in enumerate(parlays, 1):
+            legs = par.get("legs", [])
+            odds = par.get("combined_odds", 0)
+            leg_strs = [f"{lg.get('team', '?')} ({lg.get('market', '?')})" for lg in legs]
+            lines.append(f"Parlay {i}: {' + '.join(leg_strs)} | Odds: {odds:+d}")
+
+    return "\n".join(lines)
+
+
+def render_ask_ai_tab(picks: list, parlays: list):
+    st.markdown("### 💬 Ask the Model")
+    st.caption(
+        "Ask anything about today's picks — e.g. 'Which of the STRONG picks do you like best?' "
+        "or 'Should I parlay the first two picks?'"
+    )
+
+    # Get API key
+    api_key = st.secrets.get("ANTHROPIC_API_KEY", "") if hasattr(st, "secrets") else ""
+    if not api_key:
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+
+    if not api_key:
+        st.warning(
+            "Add `ANTHROPIC_API_KEY` to your Streamlit secrets to enable the AI chat. "
+            "Get a key at console.anthropic.com."
+        )
+        return
+
+    # Build system prompt once per session (picks change daily)
+    if "ai_picks_context" not in st.session_state:
+        st.session_state["ai_picks_context"] = _build_picks_context(picks, parlays)
+    if "ai_chat_history" not in st.session_state:
+        st.session_state["ai_chat_history"] = []
+
+    system_prompt = (
+        "You are an expert MLB sports betting analyst assistant embedded in a betting model dashboard. "
+        "You have access to today's model picks, their tiers (STRONG/MEDIUM/LEAN), markets, "
+        "expected value percentages, and key statistical factors. "
+        "Answer the user's questions concisely and analytically. "
+        "When comparing picks, weigh EV%, tier, and the quality of factors. "
+        "Never fabricate odds or stats not provided in the context. "
+        "Always remind the user that all picks are for research purposes only.\n\n"
+        f"--- PICKS CONTEXT ---\n{st.session_state['ai_picks_context']}\n--- END CONTEXT ---"
+    )
+
+    # Render previous messages
+    for msg in st.session_state["ai_chat_history"]:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    # Chat input
+    user_input = st.chat_input("Ask about today's picks...")
+    if not user_input:
+        return
+
+    # Show user message
+    with st.chat_message("user"):
+        st.markdown(user_input)
+    st.session_state["ai_chat_history"].append({"role": "user", "content": user_input})
+
+    # Build messages list for API
+    messages = [
+        {"role": m["role"], "content": m["content"]}
+        for m in st.session_state["ai_chat_history"]
+    ]
+
+    # Stream response
+    with st.chat_message("assistant"):
+        response_placeholder = st.empty()
+        full_response = ""
+        try:
+            import anthropic
+            client = anthropic.Anthropic(api_key=api_key)
+            with client.messages.stream(
+                model="claude-opus-4-7",
+                max_tokens=1024,
+                system=system_prompt,
+                messages=messages,
+            ) as stream:
+                for text_chunk in stream.text_stream:
+                    full_response += text_chunk
+                    response_placeholder.markdown(full_response + "▌")
+            response_placeholder.markdown(full_response)
+        except Exception as e:
+            full_response = f"Error calling Claude API: {e}"
+            response_placeholder.error(full_response)
+
+    st.session_state["ai_chat_history"].append({"role": "assistant", "content": full_response})
+
+    # Keep history bounded
+    if len(st.session_state["ai_chat_history"]) > 40:
+        st.session_state["ai_chat_history"] = st.session_state["ai_chat_history"][-40:]
+
+
 # ── App entry point ───────────────────────────────────────────────────
 
 def main():
@@ -1928,6 +2048,7 @@ def main():
         "📊 Signal Performance",
         "📝 Record a Bet",
         "🧠 Intelligence",
+        "💬 Ask AI",
     ])
 
     with tabs[0]: render_picks_tab(picks)
@@ -1939,6 +2060,7 @@ def main():
     with tabs[6]: render_signals_tab()
     with tabs[7]: render_record_bet_tab(picks, parlays, nrfi_ranked, hr_results)
     with tabs[8]: render_model_intelligence()
+    with tabs[9]: render_ask_ai_tab(picks, parlays)
 
     # Footer
     st.markdown("---")
