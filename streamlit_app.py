@@ -933,6 +933,112 @@ def render_signals_tab():
     st.caption("Weights auto-adjust after every cycle. Signals hitting >60% get boosted, <48% get penalized.")
 
 
+def render_model_intelligence():
+    """Show what the model has learned from graded picks."""
+    from sports_betting.database import get_db
+    from sports_betting.models.weight_trainer import (
+        analyze_factor_performance, analyze_tier_accuracy,
+        analyze_market_performance, analyze_context_patterns,
+    )
+
+    st.markdown("### 🧠 Model Intelligence")
+    st.caption("The model learns from every graded pick. These are the patterns it has discovered so far.")
+
+    try:
+        with get_db() as conn:
+            graded_count = conn.execute(
+                "SELECT COUNT(*) FROM value_bets WHERE result IN ('WIN','LOSS')"
+            ).fetchone()[0]
+            last_retrain = conn.execute(
+                "SELECT MAX(updated_at) FROM model_weights"
+            ).fetchone()[0]
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Graded Picks", graded_count)
+        c2.metric("Last Retrain", str(last_retrain or "Never")[:10])
+        needed = 20 - graded_count if graded_count < 20 else 0
+        c3.metric("Until Next Threshold Update", f"{max(0, 50 - graded_count)} more picks" if graded_count < 50 else "Active")
+
+        if graded_count < 5:
+            st.info("Need at least 5 graded picks to show learning insights. Grade your bets in the Record tab.")
+            return
+
+        tab_f, tab_t, tab_m, tab_c = st.tabs(["📊 Factor Performance", "🎯 Tier Accuracy", "🏪 Market Win Rates", "🔍 Context Patterns"])
+
+        with tab_f:
+            st.caption("Factors with >55% win rate get upweighted in future picks. <45% get downweighted.")
+            fp = analyze_factor_performance()
+            if fp:
+                import pandas as pd
+                rows_f = sorted(fp.items(), key=lambda x: -x[1]["win_rate"])
+                df_f = pd.DataFrame([
+                    {"Factor": k, "Win Rate": f"{v['win_rate']:.0%}",
+                     "Sample": v["sample"], "Wins": v["wins"], "Losses": v["losses"],
+                     "Weight": f"{v['weight_multiplier']:.2f}x"}
+                    for k, v in rows_f if v["sample"] >= 3
+                ])
+                if not df_f.empty:
+                    st.dataframe(df_f, hide_index=True)
+                else:
+                    st.caption("Not enough data per factor yet.")
+            else:
+                st.caption("No factor data yet.")
+
+        with tab_t:
+            st.caption("Do STRONG picks actually win more often than LEAN? This is the ground truth.")
+            ta = analyze_tier_accuracy()
+            if ta:
+                for tier, s in sorted(ta.items(), key=lambda x: {"STRONG":0,"MEDIUM":1,"LEAN":2}.get(x[0],3)):
+                    color = "#ef4444" if s["win_rate"] < 0.50 else "#f59e0b" if s["win_rate"] < 0.60 else "#10b981"
+                    delta = s["vs_expected"]
+                    delta_str = f"{delta:+.0%} vs expected {s['expected_win_rate']:.0%}"
+                    st.html(
+                        f'<div style="background:#111827;border-left:3px solid {color};border-radius:8px;padding:10px 16px;margin-bottom:8px">'
+                        f'<span style="color:#f1f5f9;font-weight:700">{tier}</span>'
+                        f' <span style="color:{color};font-size:18px;font-weight:800;margin:0 16px">{s["win_rate"]:.0%}</span>'
+                        f'<span style="color:#64748b;font-size:12px">{delta_str} · {s["sample"]} picks · {s["wins"]}W {s["losses"]}L</span>'
+                        f'</div>'
+                    )
+            else:
+                st.caption("Need graded MODEL_PICK bets to compute tier accuracy.")
+
+        with tab_m:
+            st.caption("Markets the model bets most accurately on rise in preference over time.")
+            mp = analyze_market_performance()
+            if mp:
+                import pandas as pd
+                rows_m = sorted(mp.items(), key=lambda x: -x[1]["win_rate"])
+                df_m = pd.DataFrame([
+                    {"Market": k, "Win Rate": f"{v['win_rate']:.0%}",
+                     "Sample": v["sample"], "Wins": v["wins"], "Losses": v["losses"]}
+                    for k, v in rows_m if v["sample"] >= 2
+                ])
+                if not df_m.empty:
+                    st.dataframe(df_m, hide_index=True)
+            else:
+                st.caption("No market data yet.")
+
+        with tab_c:
+            st.caption("Contextual situations the model has learned to weight more or less heavily.")
+            cp = analyze_context_patterns()
+            if cp:
+                import pandas as pd
+                rows_c = sorted(cp.items(), key=lambda x: -x[1]["signal_strength"])
+                df_c = pd.DataFrame([
+                    {"Context": k, "Win Rate": f"{v['win_rate']:.0%}",
+                     "Signal": "Strong" if v["signal_strength"] > 0.08 else "Moderate" if v["signal_strength"] > 0.04 else "Weak",
+                     "Sample": v["sample"]}
+                    for k, v in rows_c if v["sample"] >= 3
+                ])
+                if not df_c.empty:
+                    st.dataframe(df_c, hide_index=True)
+            else:
+                st.caption("No context pattern data yet.")
+
+    except Exception as e:
+        st.caption(f"Intelligence unavailable: {e}")
+
+
 def render_record_bet_tab(picks: list = None, parlays: list = None, nrfi_ranked: list = None, hr_results: dict = None):
     st.markdown("### 📝 Record a Bet You Placed")
     st.caption("Logging your actual bets teaches the model which signals work best over time.")
@@ -1551,6 +1657,7 @@ def main():
         f"⏭️ Skipped ({len(skipped)})",
         "📊 Signal Performance",
         "📝 Record a Bet",
+        "🧠 Intelligence",
     ])
 
     with tabs[0]: render_picks_tab(picks)
@@ -1561,6 +1668,7 @@ def main():
     with tabs[5]: render_skipped_tab(skipped)
     with tabs[6]: render_signals_tab()
     with tabs[7]: render_record_bet_tab(picks, parlays, nrfi_ranked, hr_results)
+    with tabs[8]: render_model_intelligence()
 
     # Footer
     st.markdown("---")
