@@ -1874,10 +1874,19 @@ def _build_picks_context(picks: list, parlays: list) -> str:
     if parlays:
         lines.append("=== TODAY'S PARLAYS ===")
         for i, par in enumerate(parlays, 1):
-            legs = par.get("legs", [])
-            odds = par.get("combined_odds", 0)
-            leg_strs = [f"{lg.get('team', '?')} ({lg.get('market', '?')})" for lg in legs]
-            lines.append(f"Parlay {i}: {' + '.join(leg_strs)} | Odds: {odds:+d}")
+            legs = getattr(par, "legs", [])
+            dec = getattr(par, "combined_decimal", 1.0) or 1.0
+            # Convert decimal to American odds for display
+            if dec >= 2.0:
+                combined_american = int((dec - 1) * 100)
+            else:
+                combined_american = int(-100 / (dec - 1)) if dec > 1 else 0
+            leg_strs = []
+            for lg in legs:
+                team = getattr(getattr(lg, "pick", None), "backing_team", "?") or "?"
+                mkt = getattr(lg, "market", "?") or "?"
+                leg_strs.append(f"{team} ({mkt})")
+            lines.append(f"Parlay {i} ({getattr(par, 'label', '')}): {' + '.join(leg_strs)} | Odds: +{combined_american}")
 
     return "\n".join(lines)
 
