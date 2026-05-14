@@ -209,82 +209,169 @@ def auto_record_model_picks(picks: list, parlays: list, date_str: str) -> int:
     return recorded
 
 
-def grade_pending_picks() -> int:
+def grade_pending_picks() -> dict:
     """
-    Query the MLB Stats API for games that have finished and update the
-    result column (WIN / LOSS) + profit_loss for all pending model picks.
+    Query the MLB Stats API for finished games and update result + profit_loss
+    for ALL pending bets (MODEL_PICK, MODEL_PARLAY, and PLACED) from previous days.
 
-    Only grades MODEL_PICK and MODEL_PARLAY rows from previous days.
-    PLACED bets use a separate UI flow because their game_id doesn't
-    contain a parseable MLB numeric ID.
+    Returns a status dict: {graded, errors, skipped, message}
     """
     import statsapi
     from datetime import date as _date
 
     today = _date.today().isoformat()
     graded = 0
+    errors: list[str] = []
+    skipped = 0
+
+    # Cache of date → list of game dicts to avoid repeated API calls
+    _game_cache: dict[str, list] = {}
+
+    def _fetch_games_for_date(date_str: str) -> list:
+        if date_str in _game_cache:
+            return _game_cache[date_str]
+        try:
+            # statsapi expects MM/DD/YYYY
+            from datetime import datetime as _dt
+            d = _dt.strptime(date_str, "%Y-%m-%d")
+            fmt = d.strftime("%m/%d/%Y")
+            games = statsapi.schedule(date=fmt, sportId=1)
+            _game_cache[date_str] = games or []
+        except Exception as e:
+            logger.warning("Could not fetch schedule for %s: %s", date_str, e)
+            errors.append(f"API error for {date_str}: {e}")
+            _game_cache[date_str] = []
+        return _game_cache[date_str]
 
     with get_db() as conn:
         pending = conn.execute("""
             SELECT id, game_id, market, side, book_price, recommended_bet,
-                   confidence, factors
+                   confidence, factors, detected_at
             FROM value_bets
             WHERE result IS NULL
-              AND confidence IN ('MODEL_PICK', 'MODEL_PARLAY')
               AND date(detected_at) < ?
         """, (today,)).fetchall()
 
         for row in pending:
-            mlb_id = _extract_mlb_id(row["game_id"], row["factors"])
-            if not mlb_id:
-                continue
+            confidence = row["confidence"] or ""
+            game_date  = str(row["detected_at"] or "")[:10]  # YYYY-MM-DD
+            mlb_id     = _extract_mlb_id(row["game_id"], row["factors"])
 
-            try:
-                games = statsapi.schedule(game_id=mlb_id)
-                if not games:
-                    continue
-                g = games[0]
-                if g.get("status") != "Final":
-                    continue
+            # ── Strategy 1: numeric MLB game ID (MODEL_PICK / MODEL_PARLAY) ──
+            if mlb_id:
+                try:
+                    games = statsapi.schedule(game_id=mlb_id)
+                except Exception as e:
+                    logger.debug("schedule(game_id=%s) failed: %s", mlb_id, e)
+                    games = []
 
-                home_name = g.get("home_name", "").lower()
-                away_name = g.get("away_name", "").lower()
-                home_score = int(g.get("home_score", 0) or 0)
-                away_score = int(g.get("away_score", 0) or 0)
+                if games:
+                    g = games[0]
+                    if g.get("status") != "Final":
+                        skipped += 1
+                        continue
+                    home_name  = g.get("home_name", "").lower()
+                    away_name  = g.get("away_name", "").lower()
+                    home_score = int(g.get("home_score", 0) or 0)
+                    away_score = int(g.get("away_score", 0) or 0)
+                    won = _team_won(row["side"], home_name, away_name, home_score, away_score)
+                    if won is not None:
+                        _write_result(conn, row, won)
+                        graded += 1
+                        continue
+                    else:
+                        logger.debug("Team match failed: side=%r home=%r away=%r", row["side"], home_name, away_name)
 
-                won = _team_won(row["side"], home_name, away_name, home_score, away_score)
-                if won is None:
-                    continue
-
-                result = "WIN" if won else "LOSS"
-                price  = float(row["book_price"] or 0)
-                stake  = float(row["recommended_bet"] or 5.0)
-                if won:
-                    pl = stake * price / 100 if price > 0 else stake * 100 / abs(price)
+            # ── Strategy 2: team-name fuzzy lookup (PLACED bets / fallback) ──
+            if game_date:
+                away_name_guess, home_name_guess = _parse_teams_from_game_id(row["game_id"])
+                if away_name_guess or home_name_guess:
+                    day_games = _fetch_games_for_date(game_date)
+                    for g in day_games:
+                        if g.get("status") != "Final":
+                            continue
+                        h = g.get("home_name", "").lower()
+                        a = g.get("away_name", "").lower()
+                        if not (_name_match(home_name_guess, h) or _name_match(away_name_guess, a)):
+                            continue
+                        hs = int(g.get("home_score", 0) or 0)
+                        as_ = int(g.get("away_score", 0) or 0)
+                        won = _team_won(row["side"], h, a, hs, as_)
+                        if won is not None:
+                            _write_result(conn, row, won)
+                            graded += 1
+                            break
+                    else:
+                        skipped += 1
                 else:
-                    pl = -stake
-
-                conn.execute(
-                    "UPDATE value_bets SET result = ?, profit_loss = ? WHERE id = ?",
-                    (result, round(pl, 2), row["id"]),
-                )
-                graded += 1
-
-            except Exception as e:
-                logger.debug("Could not grade pick id=%s game=%s: %s", row["id"], row["game_id"], e)
+                    skipped += 1
 
     if graded:
         logger.info("Graded %d pending picks.", graded)
-
-    # Trigger a retrain whenever picks get graded so weights stay current
-    if graded > 0:
         try:
             from ..models.weight_trainer import run_full_retrain
             run_full_retrain()
         except Exception as e:
             logger.debug("Post-grade retrain skipped: %s", e)
 
-    return graded
+    return {
+        "graded": graded,
+        "errors": errors,
+        "skipped": skipped,
+        "message": f"Graded {graded}, skipped {skipped} (still pending/no match)" + (f", {len(errors)} API errors" if errors else ""),
+    }
+
+
+def _write_result(conn, row, won: bool) -> None:
+    """Write WIN/LOSS + profit_loss to a value_bets row."""
+    result = "WIN" if won else "LOSS"
+    price  = float(row["book_price"] or 0)
+    stake  = float(row["recommended_bet"] or 5.0)
+    if won:
+        pl = stake * price / 100 if price > 0 else (stake * 100 / abs(price) if price != 0 else stake)
+    else:
+        pl = -stake
+    conn.execute(
+        "UPDATE value_bets SET result = ?, profit_loss = ? WHERE id = ?",
+        (result, round(pl, 2), row["id"]),
+    )
+
+
+def _parse_teams_from_game_id(game_id: str) -> tuple[str, str]:
+    """
+    Try to extract away / home team names from a PLACED bet game_id.
+    Format written by the form: 'Away_Team-Home_Team' (spaces → _, @ → -)
+    For parlay legs the format is '{parlay_id}_leg{n}_{Away_Team-Home_Team}'.
+    Returns (away_name, home_name) as lowercase strings, or ("", "") if unparseable.
+    """
+    gid = game_id
+    # Strip parlay leg prefix: "parlay_..._leg2_Cubs-Cardinals" → "Cubs-Cardinals"
+    import re
+    m = re.search(r'_leg\d+_(.*)', gid)
+    if m:
+        gid = m.group(1)
+
+    if "-" not in gid:
+        return "", ""
+
+    # model-prefixed: "model_YYYY-MM-DD_..." → skip
+    if gid.startswith("model_") or gid.startswith("mlb_"):
+        return "", ""
+
+    away_raw, home_raw = gid.split("-", 1)
+    away = away_raw.replace("_", " ").replace(".", "").strip().lower()
+    home = home_raw.replace("_", " ").replace(".", "").strip().lower()
+    return away, home
+
+
+def _name_match(guess: str, full_name: str) -> bool:
+    """True if any meaningful token in guess appears in full_name."""
+    if not guess or not full_name:
+        return False
+    for token in guess.split():
+        if len(token) >= 3 and token in full_name.lower():
+            return True
+    return False
 
 
 def _extract_mlb_id(game_id: str, factors_json: str | None) -> int | None:

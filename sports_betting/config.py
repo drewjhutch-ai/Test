@@ -6,13 +6,22 @@ load_dotenv()
 
 BASE_DIR = Path(__file__).parent.parent
 
-# DB lives outside the repo so it survives code updates and container restarts.
-# Override with DB_PATH env var to point at a mounted volume.
-_DEFAULT_DB_DIR = Path.home() / ".sports_betting"
-_DEFAULT_DB_DIR.mkdir(exist_ok=True)
-
 DATA_DIR = BASE_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
+
+# DB path: default is inside the repo data/ folder so it lives alongside the
+# project.  Override with DB_PATH env var to use a mounted volume or external
+# path.  On first run we also migrate data from the old ~/.sports_betting path
+# if it exists there but not at the new default location.
+_DEFAULT_DB = DATA_DIR / "betting.db"
+_LEGACY_DB  = Path.home() / ".sports_betting" / "betting.db"
+
+if not _DEFAULT_DB.exists() and _LEGACY_DB.exists():
+    import shutil
+    try:
+        shutil.copy2(str(_LEGACY_DB), str(_DEFAULT_DB))
+    except Exception:
+        pass
 
 # API Keys
 ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")
@@ -20,7 +29,7 @@ WEATHER_API_KEY = os.getenv("WEATHER_API_KEY", "")
 SPORTRADAR_API_KEY = os.getenv("SPORTRADAR_API_KEY", "")
 
 # Database
-DB_PATH = os.getenv("DB_PATH", str(_DEFAULT_DB_DIR / "betting.db"))
+DB_PATH = os.getenv("DB_PATH", str(_DEFAULT_DB))
 
 # Risk Management
 BANKROLL = float(os.getenv("BANKROLL", "1000"))

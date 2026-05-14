@@ -1344,6 +1344,26 @@ def render_record_bet_tab(picks: list = None, parlays: list = None, nrfi_ranked:
 
     # ── Bet history (My Bets + Model Picks) ───────────────────────────
     st.markdown("---")
+
+    # Grading status + regrade button
+    gs = st.session_state.get("grade_status", {})
+    if gs.get("graded", 0) > 0:
+        st.success(f"✅ Auto-graded {gs['graded']} picks this session.")
+    if gs.get("errors"):
+        with st.expander("⚠️ Grading errors (click to expand)", expanded=False):
+            for err in gs["errors"]:
+                st.caption(err)
+    col_msg, col_btn = st.columns([5, 1])
+    col_msg.caption(f"Grading status: {gs.get('message', 'Not yet run')}")
+    if col_btn.button("🔄 Regrade Now"):
+        try:
+            from sports_betting.analysis.signal_tracker import grade_pending_picks
+            st.session_state["grade_status"] = grade_pending_picks()
+        except Exception as e:
+            st.session_state["grade_status"] = {"graded": 0, "errors": [str(e)], "skipped": 0, "message": str(e)}
+        st.cache_data.clear()
+        st.rerun()
+
     try:
         from sports_betting.database import get_db
         import json as _json
@@ -1591,12 +1611,13 @@ def main():
     inject_css()
     get_db_connection()
 
-    # Grade any pending model picks from previous days in the background
-    try:
-        from sports_betting.analysis.signal_tracker import grade_pending_picks
-        grade_pending_picks()
-    except Exception:
-        pass
+    # Grade any pending picks from previous days (model + placed bets)
+    if "grade_status" not in st.session_state:
+        try:
+            from sports_betting.analysis.signal_tracker import grade_pending_picks
+            st.session_state["grade_status"] = grade_pending_picks()
+        except Exception as e:
+            st.session_state["grade_status"] = {"graded": 0, "errors": [str(e)], "skipped": 0, "message": str(e)}
 
     date_str, run_btn = render_sidebar()
 
