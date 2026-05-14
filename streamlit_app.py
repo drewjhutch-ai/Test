@@ -1257,6 +1257,37 @@ def render_record_bet_tab(picks: list = None, parlays: list = None, nrfi_ranked:
             if not rows:
                 st.caption("No bets recorded yet — submit a bet above to start tracking.")
             else:
+                # ── Grade pending PLACED bets ─────────────────────────────
+                pending_placed = [r for r in rows if not r[5]]
+                if pending_placed:
+                    with st.expander(f"⏳ Grade Pending Bets ({len(pending_placed)} ungraded)", expanded=True):
+                        st.caption("Mark each bet WIN or LOSS — results feed directly into the ROI header.")
+                        from sports_betting.database import get_db as _get_db
+                        for pr in pending_placed:
+                            bet_id_row = None
+                            with _get_db() as _conn:
+                                bet_id_row = _conn.execute(
+                                    "SELECT id, book_price, recommended_bet FROM value_bets WHERE game_id=? AND confidence='PLACED' AND result IS NULL LIMIT 1",
+                                    (pr[0],)
+                                ).fetchone()
+                            if not bet_id_row:
+                                continue
+                            bid, price, stake = bet_id_row[0], bet_id_row[1] or 0, bet_id_row[2] or 5.0
+                            label = f"{str(pr[2]).upper()[:16] if pr[2] else '?'}  {str(pr[1])[:18] if pr[1] else ''}  ({int(price):+d})  –  {str(pr[0])[:24]}"
+                            col_l, col_w, col_x = st.columns([4, 1, 1])
+                            col_l.markdown(f"<span style='color:#f1f5f9;font-size:13px'>{html_lib.escape(label)}</span>", unsafe_allow_html=True)
+                            if col_w.button("✅ WIN", key=f"win_{bid}"):
+                                pl = stake * price / 100 if price > 0 else stake * 100 / abs(price)
+                                with _get_db() as _conn:
+                                    _conn.execute("UPDATE value_bets SET result='WIN', profit_loss=? WHERE id=?", (round(pl,2), bid))
+                                st.cache_data.clear()
+                                st.rerun()
+                            if col_x.button("❌ LOSS", key=f"loss_{bid}"):
+                                with _get_db() as _conn:
+                                    _conn.execute("UPDATE value_bets SET result='LOSS', profit_loss=? WHERE id=?", (-stake, bid))
+                                st.cache_data.clear()
+                                st.rerun()
+
                 def _parse_parlay_id(factors_str):
                     try:
                         for f in _json.loads(factors_str or "[]"):
@@ -1282,44 +1313,51 @@ def render_record_bet_tab(picks: list = None, parlays: list = None, nrfi_ranked:
                 for pid, legs in groups.items():
                     date_h = str(legs[0][6])[:10] if legs[0][6] else "?"
                     results = [r[5] for r in legs]
-                    if all(r == "WIN" for r in results):  g_icon, g_color = "🟢", "#10b981"
-                    elif any(r == "LOSS" for r in results): g_icon, g_color = "🔴", "#ef4444"
-                    else:                                  g_icon, g_color = "⏳", "#94a3b8"
+                    if all(r == "WIN" for r in results):  g_icon, g_color, g_label = "🟢", "#10b981", "All Win"
+                    elif any(r == "LOSS" for r in results): g_icon, g_color, g_label = "🔴", "#ef4444", "Loss"
+                    else:                                  g_icon, g_color, g_label = "⏳", "#94a3b8", "Pending"
+                    leg_html = ""
+                    for leg_row in legs:
+                        r_icon, _ = _result_badge(leg_row[5])
+                        side_e = html_lib.escape(str(leg_row[2]).upper()[:14]) if leg_row[2] else "?"
+                        mkt_e  = html_lib.escape(str(leg_row[1])[:20]) if leg_row[1] else "?"
+                        price_e = f"{int(leg_row[3]):+d}" if leg_row[3] else "?"
+                        leg_html += (
+                            f'<div style="display:flex;gap:10px;padding:4px 0;border-top:1px solid #1e293b">'
+                            f'<span>{r_icon}</span>'
+                            f'<span style="color:#f1f5f9;font-size:13px;min-width:90px">{side_e}</span>'
+                            f'<span style="color:#64748b;font-size:12px;min-width:110px">{mkt_e}</span>'
+                            f'<span style="color:#f59e0b;font-size:12px">{price_e}</span>'
+                            f'</div>'
+                        )
                     with st.container():
-                        st.markdown(f"""
-                        <div style="background:#111827;border:1px solid #1e293b;border-left:3px solid #8b5cf6;border-radius:10px;padding:14px 18px;margin-bottom:10px">
-                            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-                                <span style="color:#8b5cf6;font-size:11px;font-weight:700;text-transform:uppercase">{g_icon} {len(legs)}-Leg Parlay · {date_h}</span>
-                                <span style="color:{g_color};font-size:12px;font-weight:600">{'All Win' if g_icon=='🟢' else 'Loss' if g_icon=='🔴' else 'Pending'}</span>
-                            </div>""", unsafe_allow_html=True)
-                        for leg_row in legs:
-                            r_icon, _ = _result_badge(leg_row[5])
-                            side_  = str(leg_row[2]).upper()[:14] if leg_row[2] else "?"
-                            mkt_   = str(leg_row[1])[:20] if leg_row[1] else "?"
-                            price_ = f"{int(leg_row[3]):+d}" if leg_row[3] else "?"
-                            st.markdown(f"""<div style="display:flex;gap:10px;padding:4px 0;border-top:1px solid #1e293b">
-                                <span>{r_icon}</span><span style="color:#f1f5f9;font-size:13px;min-width:90px">{side_}</span>
-                                <span style="color:#64748b;font-size:12px;min-width:110px">{mkt_}</span>
-                                <span style="color:#f59e0b;font-size:12px">{price_}</span></div>""", unsafe_allow_html=True)
-                        st.markdown("</div>", unsafe_allow_html=True)
+                        st.html(
+                            f'<div style="background:#111827;border:1px solid #1e293b;border-left:3px solid #8b5cf6;border-radius:10px;padding:14px 18px;margin-bottom:10px">'
+                            f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">'
+                            f'<span style="color:#8b5cf6;font-size:11px;font-weight:700;text-transform:uppercase">{g_icon} {len(legs)}-Leg Parlay · {date_h}</span>'
+                            f'<span style="color:{g_color};font-size:12px;font-weight:600">{g_label}</span>'
+                            f'</div>{leg_html}</div>'
+                        )
 
                 for r in singles:
                     r_icon, r_color = _result_badge(r[5])
-                    side_  = str(r[2]).upper()[:16] if r[2] else "?"
-                    mkt_   = str(r[1])[:20] if r[1] else "?"
-                    price_ = f"{int(r[3]):+d}" if r[3] else "?"
-                    stake_ = f"${r[4]:.0f}" if r[4] else "?"
-                    date_h = str(r[6])[:10] if r[6] else "?"
-                    st.markdown(f"""
-                    <div style="background:#111827;border:1px solid #1e293b;border-left:3px solid #3b82f6;border-radius:10px;padding:12px 18px;margin-bottom:8px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-                        <span>{r_icon}</span>
-                        <span style="color:#f1f5f9;font-size:14px;font-weight:700;min-width:80px">{side_}</span>
-                        <span style="color:#64748b;font-size:13px;min-width:110px">{mkt_}</span>
-                        <span style="color:#f59e0b;font-size:13px;min-width:55px">{price_}</span>
-                        <span style="color:#94a3b8;font-size:12px">{stake_}</span>
-                        <span style="color:{r_color};font-size:12px;font-weight:600;margin-left:auto">{r[5] or 'Pending'}</span>
-                        <span style="color:#334155;font-size:11px">{date_h}</span>
-                    </div>""", unsafe_allow_html=True)
+                    side_e  = html_lib.escape(str(r[2]).upper()[:16]) if r[2] else "?"
+                    mkt_e   = html_lib.escape(str(r[1])[:20]) if r[1] else "?"
+                    price_e = f"{int(r[3]):+d}" if r[3] else "?"
+                    stake_e = f"${r[4]:.0f}" if r[4] else "?"
+                    date_h  = html_lib.escape(str(r[6])[:10]) if r[6] else "?"
+                    res_e   = html_lib.escape(r[5] or "Pending")
+                    st.html(
+                        f'<div style="background:#111827;border:1px solid #1e293b;border-left:3px solid #3b82f6;border-radius:10px;padding:12px 18px;margin-bottom:8px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">'
+                        f'<span>{r_icon}</span>'
+                        f'<span style="color:#f1f5f9;font-size:14px;font-weight:700;min-width:80px">{side_e}</span>'
+                        f'<span style="color:#64748b;font-size:13px;min-width:110px">{mkt_e}</span>'
+                        f'<span style="color:#f59e0b;font-size:13px;min-width:55px">{price_e}</span>'
+                        f'<span style="color:#94a3b8;font-size:12px">{stake_e}</span>'
+                        f'<span style="color:{r_color};font-size:12px;font-weight:600;margin-left:auto">{res_e}</span>'
+                        f'<span style="color:#334155;font-size:11px">{date_h}</span>'
+                        f'</div>'
+                    )
 
         # ── Model Picks (auto-tracked) ────────────────────────────────
         with hist_tab_model:
