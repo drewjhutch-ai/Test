@@ -92,6 +92,98 @@ UNIT_MAP    = {"STRONG": 3, "MEDIUM": 2, "LEAN": 1}
 UNIT_SIZE   = 5
 
 
+def _format_market(raw: str, pick=None) -> str:
+    """
+    Convert a raw market string into a clear, human-readable bet description.
+    Optionally uses the pick object to add pitcher name for K props.
+    """
+    if not raw:
+        return "Moneyline"
+    r = raw.strip()
+
+    # Pitcher K prop — most common ambiguous case
+    # Format: "K Over prop (5.9)" or "k_over_5.9" etc.
+    import re
+    k_match = re.search(r'[Kk]\s*[Oo]ver\s*prop\s*\(?([\d.]+)\)?', r)
+    if k_match or "k_over" in r.lower():
+        line = k_match.group(1) if k_match else re.search(r'[\d.]+', r)
+        line = line if isinstance(line, str) else (line.group() if line else "?")
+        # Try to get the pitcher's name from the pick
+        pitcher_name = ""
+        if pick:
+            backing = getattr(pick, "backing_team", "")
+            bp = getattr(pick, "backing_pitcher", None) or getattr(pick, "home_pitcher", None)
+            ap = getattr(pick, "away_pitcher", None)
+            # Use the starter for the team we're backing
+            home_team = getattr(pick, "home_team", "")
+            if backing and home_team and backing.lower() in home_team.lower():
+                sp = getattr(pick, "home_pitcher", None)
+            else:
+                sp = getattr(pick, "away_pitcher", None)
+            if sp:
+                pitcher_name = getattr(sp, "name", "") or ""
+        if pitcher_name and pitcher_name.lower() not in ("tbd", "unknown", ""):
+            return f"{pitcher_name} K Over {line} (Pitcher Strikeout Prop)"
+        return f"Pitcher K Over {line} (Strikeout Prop)"
+
+    # K under
+    if re.search(r'[Kk]\s*[Uu]nder', r) or "k_under" in r.lower():
+        line = re.search(r'[\d.]+', r)
+        line = line.group() if line else "?"
+        if pick:
+            home_team = getattr(pick, "home_team", "")
+            backing   = getattr(pick, "backing_team", "")
+            sp = (getattr(pick, "home_pitcher", None) if backing and home_team and backing.lower() in home_team.lower()
+                  else getattr(pick, "away_pitcher", None))
+            pname = (getattr(sp, "name", "") or "") if sp else ""
+            if pname and pname.lower() not in ("tbd", "unknown", ""):
+                return f"{pname} K Under {line} (Pitcher Strikeout Prop)"
+        return f"Pitcher K Under {line} (Strikeout Prop)"
+
+    lower = r.lower()
+    # Moneyline variants
+    if lower in ("h2h", "full_game_ml", "moneyline", "ml"):
+        return "Moneyline (Full Game)"
+    if "f5" in lower and "ml" in lower:
+        return "First 5 Innings ML"
+    if "f5" in lower and "over" in lower:
+        return "First 5 Innings Over"
+    if "f5" in lower and "under" in lower:
+        return "First 5 Innings Under"
+    if "f5" in lower:
+        return "First 5 Innings ML"
+    # Run line
+    if "run_line" in lower or lower == "rl":
+        if "-1.5" in r:
+            return "Run Line -1.5 (Favorite)"
+        if "+1.5" in r:
+            return "Run Line +1.5 (Underdog)"
+        return "Run Line"
+    # Totals
+    if "nrfi" in lower:
+        return "No Run First Inning (NRFI)"
+    if "yrfi" in lower:
+        return "Yes Run First Inning (YRFI)"
+    if "game" in lower and "over" in lower:
+        return "Game Total Over"
+    if "game" in lower and "under" in lower:
+        return "Game Total Under"
+    # HR prop
+    if "hr" in lower and "prop" in lower:
+        return "Home Run Prop"
+    # ERA fraud fade
+    if "era_fraud" in lower or "fade" in lower:
+        return "Fade Pitcher (ERA Fraud)"
+    # Opponent ML
+    if "opponent" in lower or "opp" in lower:
+        return "Opponent Moneyline"
+    # Outs recorded
+    if "outs" in lower:
+        return "Outs Recorded Prop"
+    # Default: title-case the raw string and strip underscores
+    return r.replace("_", " ").title()
+
+
 def inject_css():
     st.markdown("""
     <style>
@@ -369,7 +461,7 @@ def render_picks_tab(picks: list):
     # POTD banner
     potd = next((p for p in active if p.tier == "STRONG"), active[0])
     units = UNIT_MAP.get(potd.tier, 1)
-    mkt = html_lib.escape(potd.recommended_market or potd.proposed_market or "ML")
+    mkt = html_lib.escape(_format_market(potd.recommended_market or potd.proposed_market or "", potd))
     factors_html = "  ·  ".join(html_lib.escape(str(f)) for f in potd.factors[:3])
 
     tier_badge_color = {"STRONG": "#ef4444", "MEDIUM": "#f59e0b", "LEAN": "#94a3b8"}.get(potd.tier, "#94a3b8")
@@ -409,7 +501,7 @@ def render_picks_tab(picks: list):
             st.html(f'<div style="color:{tc_hdr};font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.1em;margin:18px 0 8px 2px">{label}</div>')
 
         u = UNIT_MAP.get(p.tier, 1)
-        mkt = html_lib.escape(p.recommended_market or p.proposed_market or "ML")
+        mkt = html_lib.escape(_format_market(p.recommended_market or p.proposed_market or "", p))
         tc = tier_colors.get(p.tier, "#94a3b8")
         factors_str = "  ·  ".join(html_lib.escape(str(f)) for f in p.factors[:3]) if p.factors else "—"
 
