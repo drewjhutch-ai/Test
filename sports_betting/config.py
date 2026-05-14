@@ -5,6 +5,12 @@ from pathlib import Path
 load_dotenv()
 
 BASE_DIR = Path(__file__).parent.parent
+
+# DB lives outside the repo so it survives code updates and container restarts.
+# Override with DB_PATH env var to point at a mounted volume.
+_DEFAULT_DB_DIR = Path.home() / ".sports_betting"
+_DEFAULT_DB_DIR.mkdir(exist_ok=True)
+
 DATA_DIR = BASE_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
@@ -14,7 +20,7 @@ WEATHER_API_KEY = os.getenv("WEATHER_API_KEY", "")
 SPORTRADAR_API_KEY = os.getenv("SPORTRADAR_API_KEY", "")
 
 # Database
-DB_PATH = os.getenv("DB_PATH", str(DATA_DIR / "betting.db"))
+DB_PATH = os.getenv("DB_PATH", str(_DEFAULT_DB_DIR / "betting.db"))
 
 # Risk Management
 BANKROLL = float(os.getenv("BANKROLL", "1000"))

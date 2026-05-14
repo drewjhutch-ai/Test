@@ -1447,6 +1447,13 @@ def main():
     inject_css()
     get_db_connection()
 
+    # Grade any pending model picks from previous days in the background
+    try:
+        from sports_betting.analysis.signal_tracker import grade_pending_picks
+        grade_pending_picks()
+    except Exception:
+        pass
+
     date_str, run_btn = render_sidebar()
 
     st.markdown("""

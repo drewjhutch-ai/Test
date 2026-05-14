@@ -209,6 +209,119 @@ def auto_record_model_picks(picks: list, parlays: list, date_str: str) -> int:
     return recorded
 
 
+def grade_pending_picks() -> int:
+    """
+    Query the MLB Stats API for games that have finished and update the
+    result column (WIN / LOSS) + profit_loss for all pending model picks.
+
+    Only grades MODEL_PICK and MODEL_PARLAY rows from previous days.
+    PLACED bets use a separate UI flow because their game_id doesn't
+    contain a parseable MLB numeric ID.
+    """
+    import statsapi
+    from datetime import date as _date
+
+    today = _date.today().isoformat()
+    graded = 0
+
+    with get_db() as conn:
+        pending = conn.execute("""
+            SELECT id, game_id, market, side, book_price, recommended_bet,
+                   confidence, factors
+            FROM value_bets
+            WHERE result IS NULL
+              AND confidence IN ('MODEL_PICK', 'MODEL_PARLAY')
+              AND date(detected_at) < ?
+        """, (today,)).fetchall()
+
+        for row in pending:
+            mlb_id = _extract_mlb_id(row["game_id"], row["factors"])
+            if not mlb_id:
+                continue
+
+            try:
+                games = statsapi.schedule(game_id=mlb_id)
+                if not games:
+                    continue
+                g = games[0]
+                if g.get("status") != "Final":
+                    continue
+
+                home_name = g.get("home_name", "").lower()
+                away_name = g.get("away_name", "").lower()
+                home_score = int(g.get("home_score", 0) or 0)
+                away_score = int(g.get("away_score", 0) or 0)
+
+                won = _team_won(row["side"], home_name, away_name, home_score, away_score)
+                if won is None:
+                    continue
+
+                result = "WIN" if won else "LOSS"
+                price  = float(row["book_price"] or 0)
+                stake  = float(row["recommended_bet"] or 5.0)
+                if won:
+                    pl = stake * price / 100 if price > 0 else stake * 100 / abs(price)
+                else:
+                    pl = -stake
+
+                conn.execute(
+                    "UPDATE value_bets SET result = ?, profit_loss = ? WHERE id = ?",
+                    (result, round(pl, 2), row["id"]),
+                )
+                graded += 1
+
+            except Exception as e:
+                logger.debug("Could not grade pick id=%s game=%s: %s", row["id"], row["game_id"], e)
+
+    if graded:
+        logger.info("Graded %d pending picks.", graded)
+    return graded
+
+
+def _extract_mlb_id(game_id: str, factors_json: str | None) -> int | None:
+    """Parse the raw MLB numeric game ID from a composite game_id string."""
+    # model_YYYY-MM-DD_mlb_NNNNNN  (single picks)
+    if "_mlb_" in game_id:
+        try:
+            return int(game_id.split("_mlb_")[1].split("_")[0])
+        except (ValueError, IndexError):
+            pass
+    # mlb_NNNNNN  (direct)
+    if game_id.startswith("mlb_"):
+        try:
+            return int(game_id[4:].split("_")[0])
+        except ValueError:
+            pass
+    # Parlay legs store game_id in factors JSON as "game:mlb_NNNNNN"
+    try:
+        for f in json.loads(factors_json or "[]"):
+            s = str(f)
+            if s.startswith("game:mlb_"):
+                return int(s[9:].split("_")[0])
+            if s.startswith("game:") and s[5:].isdigit():
+                return int(s[5:])
+    except Exception:
+        pass
+    return None
+
+
+def _team_won(side: str, home: str, away: str,
+              home_score: int, away_score: int) -> bool | None:
+    """Return True if `side` won, False if lost, None if can't match."""
+    if not side:
+        return None
+    s = side.lower().strip()
+    # Try each word in the team name (e.g. "cubs" matches "chicago cubs")
+    for token in s.split():
+        if len(token) < 3:
+            continue
+        if token in home:
+            return home_score > away_score
+        if token in away:
+            return away_score > home_score
+    return None
+
+
 def update_signal_performance():
     """
     After games complete, calculate per-signal win rates and
