@@ -1372,6 +1372,78 @@ def render_record_bet_tab(picks: list = None, parlays: list = None, nrfi_ranked:
 
         # ── My Bets (manually recorded) ──────────────────────────────
         with hist_tab_my:
+            # ── Backup / Restore bar ─────────────────────────────────
+            with st.expander("💾 Backup & Restore Bet Data", expanded=False):
+                st.caption("Export your bets to CSV so data survives app restarts. Re-import to restore.")
+                import io as _io, csv as _csv
+                with get_db() as _bc:
+                    all_bets = _bc.execute("""
+                        SELECT game_id, book, market, side, book_price, model_probability,
+                               implied_probability, edge, kelly_fraction, recommended_bet,
+                               confidence, factors, detected_at, result, profit_loss
+                        FROM value_bets ORDER BY detected_at DESC
+                    """).fetchall()
+                if all_bets:
+                    buf = _io.StringIO()
+                    w = _csv.writer(buf)
+                    w.writerow(["game_id","book","market","side","book_price","model_probability",
+                                "implied_probability","edge","kelly_fraction","recommended_bet",
+                                "confidence","factors","detected_at","result","profit_loss"])
+                    for r in all_bets:
+                        w.writerow(list(r))
+                    st.download_button("⬇️ Download bets CSV", buf.getvalue(),
+                                       file_name="bets_backup.csv", mime="text/csv")
+                else:
+                    st.caption("No bets in DB yet.")
+
+                uploaded = st.file_uploader("⬆️ Restore from CSV", type="csv", key="restore_csv")
+                if uploaded:
+                    try:
+                        import csv as _csv2
+                        reader = _csv2.DictReader(_io.StringIO(uploaded.read().decode()))
+                        restored = 0
+                        with get_db() as _rc:
+                            for row in reader:
+                                gid = row.get("game_id","")
+                                if not gid:
+                                    continue
+                                exists = _rc.execute(
+                                    "SELECT id FROM value_bets WHERE game_id=? AND confidence=? AND detected_at=? LIMIT 1",
+                                    (gid, row.get("confidence",""), row.get("detected_at",""))
+                                ).fetchone()
+                                if exists:
+                                    continue
+                                _rc.execute("""
+                                    INSERT OR IGNORE INTO games (game_id, home_team, away_team, game_date, status)
+                                    VALUES (?, 'Unknown','Unknown', date('now'), 'scheduled')
+                                """, (gid,))
+                                _rc.execute("""
+                                    INSERT INTO value_bets
+                                    (game_id, book, market, side, book_price, model_probability,
+                                     implied_probability, edge, kelly_fraction, recommended_bet,
+                                     confidence, factors, detected_at, result, profit_loss)
+                                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                                """, (
+                                    gid, row.get("book","draftkings"), row.get("market",""),
+                                    row.get("side",""), float(row.get("book_price") or 0),
+                                    float(row.get("model_probability") or 0),
+                                    float(row.get("implied_probability") or 0),
+                                    float(row.get("edge") or 0),
+                                    float(row.get("kelly_fraction") or 0),
+                                    float(row.get("recommended_bet") or 5),
+                                    row.get("confidence","PLACED"),
+                                    row.get("factors","[]"),
+                                    row.get("detected_at",""),
+                                    row.get("result") or None,
+                                    float(row.get("profit_loss") or 0) if row.get("profit_loss") else None,
+                                ))
+                                restored += 1
+                        st.success(f"Restored {restored} bets.")
+                        st.cache_data.clear()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Restore failed: {e}")
+
             with get_db() as conn:
                 rows = conn.execute("""
                     SELECT game_id, market, side, book_price, recommended_bet, result, detected_at, factors
@@ -1381,7 +1453,7 @@ def render_record_bet_tab(picks: list = None, parlays: list = None, nrfi_ranked:
                 """).fetchall()
 
             if not rows:
-                st.caption("No bets recorded yet — submit a bet above to start tracking.")
+                st.caption("No bets recorded yet — submit a bet above to start tracking. Use the backup tool above to restore previous data.")
             else:
                 # ── Grade pending PLACED bets ─────────────────────────────
                 pending_placed = [r for r in rows if not r[5]]

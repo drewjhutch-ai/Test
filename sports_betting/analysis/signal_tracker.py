@@ -249,8 +249,7 @@ def grade_pending_picks() -> dict:
                    confidence, factors, detected_at
             FROM value_bets
             WHERE result IS NULL
-              AND date(detected_at) < ?
-        """, (today,)).fetchall()
+        """).fetchall()
 
         for row in pending:
             confidence = row["confidence"] or ""
