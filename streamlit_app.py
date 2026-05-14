@@ -47,6 +47,37 @@ def cached_roi():
     from sports_betting.models.trainer import compute_roi_summary
     return compute_roi_summary()
 
+@st.cache_data(ttl=60)
+def cached_model_roi():
+    """ROI computed only from MODEL_PICK / MODEL_PARLAY rows."""
+    from sports_betting.database import get_db
+    try:
+        with get_db() as conn:
+            row = conn.execute("""
+                SELECT
+                    COUNT(*)                                              AS total,
+                    SUM(CASE WHEN result='WIN'  THEN 1 ELSE 0 END)       AS wins,
+                    SUM(CASE WHEN result='LOSS' THEN 1 ELSE 0 END)       AS losses,
+                    SUM(recommended_bet)                                  AS staked,
+                    SUM(profit_loss)                                      AS profit,
+                    AVG(CASE WHEN result='WIN' THEN 1.0 ELSE 0.0 END)    AS hit_rate
+                FROM value_bets
+                WHERE result IS NOT NULL
+                  AND confidence IN ('MODEL_PICK', 'MODEL_PARLAY')
+            """).fetchone()
+        if not row or not row["total"]:
+            return {}
+        staked = row["staked"] or 1
+        profit = row["profit"] or 0
+        return {
+            "total": row["total"], "wins": row["wins"], "losses": row["losses"],
+            "hit_rate": round(row["hit_rate"] or 0, 4),
+            "roi": round(profit / staked * 100, 2),
+            "profit": round(profit, 2),
+        }
+    except Exception:
+        return {}
+
 @st.cache_data(ttl=300)
 def cached_signals():
     from sports_betting.analysis.signal_tracker import get_signal_performance_report
@@ -270,6 +301,51 @@ def render_header(roi: dict):
         </div>
     </div>
     """, unsafe_allow_html=True)
+
+
+def render_model_header(mroi: dict):
+    """Separate header tracking the model's own autonomous pick record."""
+    if not mroi:
+        st.html(
+            '<div style="background:#0d1117;border:1px solid #1e293b;border-radius:12px;'
+            'padding:14px 24px;margin-bottom:16px;display:flex;align-items:center;gap:12px">'
+            '<span style="color:#8b5cf6;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.1em">🤖 AI Model Record</span>'
+            '<span style="color:#334155;font-size:12px;margin-left:8px">No graded model picks yet — grades update automatically after each game ends</span>'
+            '</div>'
+        )
+        return
+    wins   = mroi.get("wins", 0)
+    losses = mroi.get("losses", 0)
+    total  = mroi.get("total", 0)
+    hit    = mroi.get("hit_rate", 0)
+    roi    = mroi.get("roi", 0)
+    profit = mroi.get("profit", 0)
+    roi_color    = "#10b981" if roi >= 0 else "#ef4444"
+    profit_color = "#10b981" if profit >= 0 else "#ef4444"
+    st.html(
+        f'<div style="background:#0d1117;border:1px solid #1e293b;border-left:3px solid #8b5cf6;'
+        f'border-radius:12px;padding:16px 28px;margin-bottom:16px">'
+        f'<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:16px">'
+        f'<div>'
+        f'<div style="color:#8b5cf6;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.12em">🤖 AI Model Record</div>'
+        f'<div style="color:#f1f5f9;font-size:26px;font-weight:800;line-height:1.1;margin-top:2px">{wins}–{losses}</div>'
+        f'<div style="color:#475569;font-size:11px;margin-top:2px">{total} graded picks</div>'
+        f'</div>'
+        f'<div style="text-align:center">'
+        f'<div style="color:#475569;font-size:10px;text-transform:uppercase;letter-spacing:0.1em">Hit Rate</div>'
+        f'<div style="color:#f59e0b;font-size:24px;font-weight:800;line-height:1.1">{hit:.1%}</div>'
+        f'</div>'
+        f'<div style="text-align:center">'
+        f'<div style="color:#475569;font-size:10px;text-transform:uppercase;letter-spacing:0.1em">ROI</div>'
+        f'<div style="color:{roi_color};font-size:24px;font-weight:800;line-height:1.1">{roi:+.1f}%</div>'
+        f'</div>'
+        f'<div style="text-align:right">'
+        f'<div style="color:#475569;font-size:10px;text-transform:uppercase;letter-spacing:0.1em">Net P/L</div>'
+        f'<div style="color:{profit_color};font-size:24px;font-weight:800;line-height:1.1">{profit:+.0f}u</div>'
+        f'</div>'
+        f'</div>'
+        f'</div>'
+    )
 
 
 def render_picks_tab(picks: list):
@@ -1560,29 +1636,31 @@ def render_record_bet_tab(picks: list = None, parlays: list = None, nrfi_ranked:
         # ── Model Picks (auto-tracked) ────────────────────────────────
         with hist_tab_model:
             with get_db() as conn:
+                # No row limit — show full lifetime history
                 model_rows = conn.execute("""
                     SELECT game_id, market, side, book_price, model_probability,
                            edge, result, detected_at, factors, confidence
                     FROM value_bets
                     WHERE confidence IN ('MODEL_PICK', 'MODEL_PARLAY')
-                    ORDER BY detected_at DESC LIMIT 200
+                    ORDER BY detected_at DESC
                 """).fetchall()
 
             if not model_rows:
                 st.info("No model picks tracked yet — run the model to start auto-tracking picks and parlays.")
             else:
-                # Performance summary
-                graded    = [r for r in model_rows if r[6] in ("WIN", "LOSS")]
-                wins      = sum(1 for r in graded if r[6] == "WIN")
-                losses    = len(graded) - wins
-                pending   = len(model_rows) - len(graded)
-                win_rate  = wins / len(graded) if graded else 0.0
+                # ── Lifetime performance summary ──────────────────────
+                graded   = [r for r in model_rows if r[6] in ("WIN", "LOSS")]
+                wins     = sum(1 for r in graded if r[6] == "WIN")
+                losses   = len(graded) - wins
+                pending  = sum(1 for r in model_rows if not r[6])
+                win_rate = wins / len(graded) if graded else 0.0
 
                 c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Total Picks", len(model_rows))
-                c2.metric("Win Rate", f"{win_rate:.0%}" if graded else "—", f"{wins}W / {losses}L" if graded else None)
+                c1.metric("All-Time Picks", len(model_rows))
+                c2.metric("Win Rate", f"{win_rate:.0%}" if graded else "—",
+                          f"{wins}W / {losses}L" if graded else None)
                 c3.metric("Graded", len(graded))
-                c4.metric("Pending", pending)
+                c4.metric("Pending Grade", pending)
 
                 st.markdown("---")
 
@@ -1683,13 +1761,18 @@ def main():
     inject_css()
     get_db_connection()
 
-    # Grade any pending picks from previous days (model + placed bets)
-    if "grade_status" not in st.session_state:
-        try:
-            from sports_betting.analysis.signal_tracker import grade_pending_picks
-            st.session_state["grade_status"] = grade_pending_picks()
-        except Exception as e:
-            st.session_state["grade_status"] = {"graded": 0, "errors": [str(e)], "skipped": 0, "message": str(e)}
+    # Grade ALL pending picks every load (no session cache — games finish at
+    # different times and we want results to appear as soon as possible).
+    try:
+        from sports_betting.analysis.signal_tracker import grade_pending_picks
+        gs = grade_pending_picks()
+        if gs.get("graded", 0):
+            st.cache_data.clear()   # force header metrics to refresh
+        st.session_state["grade_status"] = gs
+    except Exception as e:
+        st.session_state["grade_status"] = {
+            "graded": 0, "errors": [str(e)], "skipped": 0, "message": str(e)
+        }
 
     date_str, run_btn = render_sidebar()
 
@@ -1701,9 +1784,11 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    # ROI header
+    # Combined bets ROI header (manually placed + model)
     roi = cached_roi()
     render_header(roi)
+    # Model-only autonomous record
+    render_model_header(cached_model_roi())
 
     # Run model
     if run_btn:
