@@ -21,6 +21,18 @@ _TIER_THRESHOLDS: dict = {
     "SKIP":   (0.40, 1.00),
 }
 
+# Learned factor weight multipliers — updated by daily_runner after load_learned_weights()
+# {keyword: multiplier} where >1.0 means that factor historically predicts wins
+_FACTOR_WEIGHTS: dict[str, float] = {}
+
+
+def update_factor_weights(weights: dict) -> None:
+    """Called by daily_runner after loading learned weights from DB."""
+    global _FACTOR_WEIGHTS
+    if weights:
+        _FACTOR_WEIGHTS.update(weights)
+        logger.info("Factor weights updated: %d signals loaded", len(weights))
+
 
 def update_tier_thresholds(thresholds: dict) -> None:
     """Called by daily_runner after loading learned weights."""
@@ -784,6 +796,52 @@ def layer_12_limits(card: list[PickCandidate]) -> LayerOutput:
     return out
 
 
+def _extract_keywords_for_weight(factor_str: str) -> list[str]:
+    """Map a factor string to weight lookup keys (mirrors weight_trainer._extract_factor_keywords)."""
+    kws = []
+    s = factor_str.lower()
+    keyword_map = {
+        "siera": "elite_siera", "xfip": "xfip_edge", "era": "era_edge",
+        "k/9": "high_k9", "whip": "whip_edge", "bullpen": "bullpen_signal",
+        "wind": "wind_signal", "wrigley": "wrigley_wind", "park": "park_factor",
+        "sharp": "sharp_money", "pythag": "pythag_luck",
+        "travel": "travel_fatigue", "opener": "opener_game",
+        "velocity": "velocity_drop", "barrel": "barrel_rate",
+        "xwoba": "xwoba_luck", "momentum": "team_momentum",
+        "streak": "win_streak", "below .500": "fade_sub500",
+        "road": "road_record", "home": "home_edge",
+        "fraud": "era_fraud", "fade list": "fade_list",
+        "backs list": "backs_list", "clv": "clv_positive",
+    }
+    for token, kw in keyword_map.items():
+        if token in s:
+            kws.append(kw)
+    return kws or ["generic_factor"]
+
+
+def _compute_learned_adjustment(factors: list[str]) -> float:
+    """
+    Convert learned factor weights into a small losing_pct nudge.
+    Returns value clamped to [-0.06, +0.06].
+    Positive → reduce losing_pct (model more confident this wins).
+    Negative → increase losing_pct (model less confident).
+    Only fires when we have real sample data (weight != 1.0).
+    """
+    if not _FACTOR_WEIGHTS or not factors:
+        return 0.0
+    weights = []
+    for f in factors:
+        for kw in _extract_keywords_for_weight(str(f)):
+            if kw in _FACTOR_WEIGHTS:
+                weights.append(_FACTOR_WEIGHTS[kw])
+    if not weights:
+        return 0.0
+    avg = sum(weights) / len(weights)
+    # multiplier 1.0 = no change; 1.3 → reduce lose_pct ~3%; 0.7 → raise it ~3%
+    raw = (avg - 1.0) * 0.10
+    return max(-0.06, min(0.06, raw))
+
+
 # ------------------------------------------------------------------ #
 #  Full pipeline                                                       #
 # ------------------------------------------------------------------ #
@@ -821,5 +879,21 @@ def run_all_layers(
         result = fn()
         pick.layer_outputs.append(result)
         # TBD pitcher: note the uncertainty but continue analyzing with available team data
+
+    # Apply learned factor weight adjustment (soft nudge only — never overrides hard rules)
+    if _FACTOR_WEIGHTS and pick.tier != "SKIP" and pick.factors:
+        adj = _compute_learned_adjustment(pick.factors)
+        if adj != 0.0:
+            new_lose = max(0.10, min(0.89, pick.losing_pct - adj))
+            pick.losing_pct = round(new_lose, 4)
+            # Re-derive tier from adjusted losing_pct
+            for tier, (lo, hi) in _TIER_THRESHOLDS.items():
+                if lo <= new_lose < hi:
+                    pick.tier = tier
+                    break
+            logger.debug(
+                "Learned adj %.3f → lose_pct %.3f tier %s for %s",
+                adj, new_lose, pick.tier, pick.game_id,
+            )
 
     return pick

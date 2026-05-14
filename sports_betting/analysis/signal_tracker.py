@@ -275,6 +275,15 @@ def grade_pending_picks() -> int:
 
     if graded:
         logger.info("Graded %d pending picks.", graded)
+
+    # Trigger a retrain whenever picks get graded so weights stay current
+    if graded > 0:
+        try:
+            from ..models.weight_trainer import run_full_retrain
+            run_full_retrain()
+        except Exception as e:
+            logger.debug("Post-grade retrain skipped: %s", e)
+
     return graded
 
 

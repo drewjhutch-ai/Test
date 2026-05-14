@@ -330,6 +330,152 @@ def load_learned_weights() -> dict:
         return defaults
 
 
+def analyze_tier_accuracy() -> dict[str, dict]:
+    """
+    Compute actual win rate per tier (STRONG/MEDIUM/LEAN) vs expected.
+    The model assigns tiers based on losing_pct; this checks whether
+    STRONG picks actually win more often than LEAN in practice.
+    """
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT vb.model_probability, vb.edge, vb.result, vb.factors
+            FROM value_bets vb
+            WHERE vb.result IN ('WIN','LOSS')
+            AND vb.confidence IN ('MODEL_PICK', 'PLACED')
+            AND vb.detected_at >= datetime('now', '-180 days')
+        """).fetchall()
+
+    tier_stats: dict[str, dict] = {
+        "STRONG": {"wins": 0, "losses": 0},
+        "MEDIUM": {"wins": 0, "losses": 0},
+        "LEAN":   {"wins": 0, "losses": 0},
+    }
+
+    for row in rows:
+        # Derive tier from model_probability stored at bet time
+        prob = row["model_probability"] or 0.5
+        lose_pct = 1.0 - prob
+        if lose_pct < 0.25:
+            tier = "STRONG"
+        elif lose_pct < 0.32:
+            tier = "MEDIUM"
+        elif lose_pct < 0.40:
+            tier = "LEAN"
+        else:
+            continue
+        if row["result"] == "WIN":
+            tier_stats[tier]["wins"] += 1
+        else:
+            tier_stats[tier]["losses"] += 1
+
+    results = {}
+    for tier, s in tier_stats.items():
+        total = s["wins"] + s["losses"]
+        if total < 3:
+            continue
+        win_rate = s["wins"] / total
+        expected = {"STRONG": 0.75, "MEDIUM": 0.68, "LEAN": 0.60}.get(tier, 0.60)
+        results[tier] = {
+            "wins": s["wins"],
+            "losses": s["losses"],
+            "win_rate": round(win_rate, 4),
+            "expected_win_rate": expected,
+            "vs_expected": round(win_rate - expected, 4),
+            "sample": total,
+        }
+    return results
+
+
+def analyze_context_patterns() -> dict[str, dict]:
+    """
+    Analyze win rates by situational context extracted from factor strings:
+    home/away, weather (wind/dome), series position, bullpen signals, etc.
+    Returns {context_label: {win_rate, wins, losses, sample}}.
+    """
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT factors, result FROM value_bets
+            WHERE result IN ('WIN','LOSS')
+            AND factors IS NOT NULL
+            AND detected_at >= datetime('now', '-180 days')
+        """).fetchall()
+
+    context_stats: dict[str, dict] = {}
+
+    context_checks = [
+        ("home_field",       lambda f: "home" in f and "road" not in f),
+        ("road_team",        lambda f: "road" in f or "away" in f),
+        ("wind_in",          lambda f: "wind" in f and "in" in f),
+        ("wind_out",         lambda f: "wind" in f and "out" in f),
+        ("dome_game",        lambda f: "dome" in f),
+        ("bullpen_edge",     lambda f: "bullpen" in f),
+        ("sharp_money",      lambda f: "sharp" in f),
+        ("hot_streak",       lambda f: "streak" in f and "cold" not in f),
+        ("cold_streak",      lambda f: "cold" in f and "streak" in f),
+        ("era_fraud",        lambda f: "fraud" in f),
+        ("backs_list",       lambda f: "backs" in f),
+        ("fade_list",        lambda f: "fade" in f and "list" in f),
+        ("pythag_luck",      lambda f: "pythag" in f),
+        ("velocity_drop",    lambda f: "velocity" in f),
+        ("park_factor",      lambda f: "park" in f),
+    ]
+
+    for row in rows:
+        won = row["result"] == "WIN"
+        try:
+            factors = json.loads(row["factors"] or "[]")
+        except Exception:
+            continue
+        joined = " ".join(str(f).lower() for f in factors)
+        for label, check in context_checks:
+            if check(joined):
+                if label not in context_stats:
+                    context_stats[label] = {"wins": 0, "losses": 0}
+                if won:
+                    context_stats[label]["wins"] += 1
+                else:
+                    context_stats[label]["losses"] += 1
+
+    results = {}
+    for label, s in context_stats.items():
+        total = s["wins"] + s["losses"]
+        if total < 3:
+            continue
+        win_rate = s["wins"] / total
+        results[label] = {
+            "wins": s["wins"],
+            "losses": s["losses"],
+            "win_rate": round(win_rate, 4),
+            "sample": total,
+            "signal_strength": round(abs(win_rate - 0.55), 4),
+        }
+    return results
+
+
+def _save_analysis_results(tier_accuracy: dict, context_patterns: dict) -> None:
+    """Persist tier accuracy and context pattern results to model_weights table."""
+    with get_db() as conn:
+        for tier, stats in tier_accuracy.items():
+            conn.execute("""
+                INSERT INTO model_weights (weight_key, weight_value, sample_size)
+                VALUES (?, ?, ?)
+                ON CONFLICT(weight_key) DO UPDATE SET
+                    weight_value = excluded.weight_value,
+                    sample_size  = excluded.sample_size,
+                    updated_at   = datetime('now')
+            """, (f"tier_accuracy:{tier}", stats["win_rate"], stats["sample"]))
+
+        for label, stats in context_patterns.items():
+            conn.execute("""
+                INSERT INTO model_weights (weight_key, weight_value, sample_size)
+                VALUES (?, ?, ?)
+                ON CONFLICT(weight_key) DO UPDATE SET
+                    weight_value = excluded.weight_value,
+                    sample_size  = excluded.sample_size,
+                    updated_at   = datetime('now')
+            """, (f"context:{label}", stats["win_rate"], stats["sample"]))
+
+
 def run_full_retrain() -> dict:
     """
     Main entry point. Runs full self-improvement cycle:
@@ -356,7 +502,10 @@ def run_full_retrain() -> dict:
     factor_perf  = analyze_factor_performance()
     market_perf  = analyze_market_performance()
     thresholds   = compute_dynamic_thresholds(graded_count)
+    tier_accuracy   = analyze_tier_accuracy()
+    context_patterns = analyze_context_patterns()
     save_learned_weights(factor_perf, market_perf, thresholds)
+    _save_analysis_results(tier_accuracy, context_patterns)
 
     # Find best and worst factors
     if factor_perf:
@@ -376,6 +525,8 @@ def run_full_retrain() -> dict:
         "graded": graded_count,
         "factors_analyzed": len(factor_perf),
         "markets_analyzed": len(market_perf),
+        "tier_accuracy": tier_accuracy,
+        "context_patterns": len(context_patterns),
         "best_factor":  best_factor,
         "worst_factor": worst_factor,
         "best_market":  best_market,

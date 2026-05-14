@@ -31,7 +31,7 @@ from .pitcher_lists import is_on_fade_list, is_on_backs_list, is_era_fraud
 from .hard_rules import run_all_hard_rules_for_card, check_seven_day_cap
 from .layer_engine import (
     PickCandidate, PitcherProfile, TeamProfile, WeatherProfile, run_all_layers,
-    update_tier_thresholds,
+    update_tier_thresholds, update_factor_weights,
 )
 from ..models.outcome_grader import grade_all_pending
 from ..models.weight_trainer import run_full_retrain, load_learned_weights
@@ -98,6 +98,8 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
 
     # Apply dynamic tier thresholds to layer engine
     update_tier_thresholds(learned_weights.get("thresholds", {}))
+    # Apply learned factor weights to the scoring pipeline
+    update_factor_weights(learned_weights.get("factors", {}))
 
     # ------------------------------------------------------------------ #
     # PHASE 1 — Data pull                                                 #
