@@ -143,6 +143,7 @@ def compute_roi_summary() -> dict:
                 AVG(CASE WHEN result='WIN' THEN 1.0 ELSE 0.0 END) as hit_rate
             FROM value_bets
             WHERE result IS NOT NULL
+              AND confidence = 'PLACED'
         """).fetchone()
 
     if not row or not row["total_bets"]:

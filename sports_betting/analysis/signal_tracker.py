@@ -39,31 +39,32 @@ WEIGHTS_CACHE_KEY = "signal_weights"
 
 
 def get_signal_weights() -> dict[str, float]:
-    """Load current signal weights from DB, or return defaults."""
-    with get_db() as conn:
-        row = conn.execute("""
-            SELECT value FROM model_performance
-            WHERE model_version = 'signal_weights'
-            ORDER BY updated_at DESC LIMIT 1
-        """).fetchone()
-
-    if row:
-        try:
-            return json.loads(row["value"] if "value" in row.keys() else str(row[0]))
-        except Exception:
-            pass
+    """Load current signal weights from DB (model_weights table), or return defaults."""
+    try:
+        with get_db() as conn:
+            rows = conn.execute("""
+                SELECT weight_key, weight_value FROM model_weights
+                WHERE weight_key LIKE 'signal_%'
+            """).fetchall()
+        if rows:
+            return {r["weight_key"][len("signal_"):]: r["weight_value"] for r in rows}
+    except Exception:
+        pass
     return DEFAULT_WEIGHTS.copy()
 
 
 def save_signal_weights(weights: dict):
-    """Persist updated signal weights to DB."""
-    with get_db() as conn:
-        conn.execute("""
-            INSERT OR REPLACE INTO model_performance
-            (model_version, prediction_date, total_predictions, updated_at)
-            VALUES ('signal_weights', ?, 0, datetime('now'))
-        """, (datetime.now().date().isoformat(),))
-    logger.info("Signal weights saved.")
+    """Persist updated signal weights to the model_weights table."""
+    try:
+        with get_db() as conn:
+            for signal, w in weights.items():
+                conn.execute("""
+                    INSERT OR REPLACE INTO model_weights (weight_key, weight_value, updated_at)
+                    VALUES (?, ?, datetime('now'))
+                """, (f"signal_{signal}", float(w)))
+        logger.info("Signal weights saved (%d signals).", len(weights))
+    except Exception as exc:
+        logger.warning("Could not save signal weights: %s", exc)
 
 
 def record_placed_bet(
