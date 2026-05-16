@@ -1517,10 +1517,8 @@ def render_record_bet_tab(picks: list = None, parlays: list = None, nrfi_ranked:
     gs = st.session_state.get("grade_status", {})
     if gs.get("graded", 0) > 0:
         st.success(f"✅ Auto-graded {gs['graded']} picks this session.")
-    if gs.get("errors"):
-        with st.expander("⚠️ Grading errors (click to expand)", expanded=False):
-            for err in gs["errors"]:
-                st.caption(err)
+    if gs.get("pending_today", 0) > 0:
+        st.info(f"⏳ {gs['pending_today']} picks awaiting tonight's game results — will auto-grade after games finish.")
     col_msg, col_btn = st.columns([5, 1])
     col_msg.caption(f"Grading status: {gs.get('message', 'Not yet run')}")
     if col_btn.button("🔄 Regrade Now"):
@@ -1531,6 +1529,10 @@ def render_record_bet_tab(picks: list = None, parlays: list = None, nrfi_ranked:
             st.session_state["grade_status"] = {"graded": 0, "errors": [str(e)], "skipped": 0, "message": str(e)}
         st.cache_data.clear()
         st.rerun()
+    if gs.get("errors"):
+        with st.expander(f"⚠️ {len(gs['errors'])} grading detail(s) — click to diagnose", expanded=False):
+            for err in gs["errors"]:
+                st.caption(err)
 
     try:
         from sports_betting.database import get_db

@@ -210,12 +210,15 @@ def auto_record_model_picks(picks: list, parlays: list, date_str: str) -> int:
     return recorded
 
 
+_FINAL_STATUSES = {"Final", "Game Over", "Completed Early", "Completed"}
+
+
 def grade_pending_picks() -> dict:
     """
     Query the MLB Stats API for finished games and update result + profit_loss
-    for ALL pending bets (MODEL_PICK, MODEL_PARLAY, and PLACED) from previous days.
+    for ALL pending bets (MODEL_PICK, MODEL_PARLAY, and PLACED).
 
-    Returns a status dict: {graded, errors, skipped, message}
+    Returns a status dict: {graded, errors, skipped, pending_today, message}
     """
     import statsapi
     from datetime import date as _date
@@ -224,6 +227,7 @@ def grade_pending_picks() -> dict:
     graded = 0
     errors: list[str] = []
     skipped = 0
+    pending_today = 0  # games from today that haven't finished yet
 
     # Cache of date → list of game dicts to avoid repeated API calls
     _game_cache: dict[str, list] = {}
@@ -232,7 +236,6 @@ def grade_pending_picks() -> dict:
         if date_str in _game_cache:
             return _game_cache[date_str]
         try:
-            # statsapi expects MM/DD/YYYY
             from datetime import datetime as _dt
             d = _dt.strptime(date_str, "%Y-%m-%d")
             fmt = d.strftime("%m/%d/%Y")
@@ -240,7 +243,7 @@ def grade_pending_picks() -> dict:
             _game_cache[date_str] = games or []
         except Exception as e:
             logger.warning("Could not fetch schedule for %s: %s", date_str, e)
-            errors.append(f"API error for {date_str}: {e}")
+            errors.append(f"API fetch error for {date_str}: {e}")
             _game_cache[date_str] = []
         return _game_cache[date_str]
 
@@ -253,58 +256,75 @@ def grade_pending_picks() -> dict:
         """).fetchall()
 
         for row in pending:
-            confidence = row["confidence"] or ""
-            game_date  = str(row["detected_at"] or "")[:10]  # YYYY-MM-DD
-            mlb_id     = _extract_mlb_id(row["game_id"], row["factors"])
+            game_date = str(row["detected_at"] or "")[:10]   # YYYY-MM-DD
+            mlb_id    = _extract_mlb_id(row["game_id"], row["factors"])
+            side      = row["side"] or ""
 
-            # ── Strategy 1: numeric MLB game ID (MODEL_PICK / MODEL_PARLAY) ──
+            # ── Strategy 1: numeric MLB game ID ──────────────────────────
             if mlb_id:
                 try:
                     games = statsapi.schedule(game_id=mlb_id)
                 except Exception as e:
-                    logger.debug("schedule(game_id=%s) failed: %s", mlb_id, e)
+                    errors.append(f"API lookup failed for game {mlb_id}: {e}")
                     games = []
 
                 if games:
                     g = games[0]
-                    if g.get("status") != "Final":
-                        skipped += 1
+                    status = g.get("status", "")
+                    if status not in _FINAL_STATUSES:
+                        # Game is today and hasn't finished — genuinely pending
+                        if game_date == today:
+                            pending_today += 1
+                        else:
+                            # Future game or postponed
+                            skipped += 1
                         continue
+
                     home_name  = g.get("home_name", "").lower()
                     away_name  = g.get("away_name", "").lower()
                     home_score = int(g.get("home_score", 0) or 0)
                     away_score = int(g.get("away_score", 0) or 0)
-                    won = _team_won(row["side"], home_name, away_name, home_score, away_score)
+                    won = _team_won(side, home_name, away_name, home_score, away_score)
                     if won is not None:
                         _write_result(conn, row, won)
                         graded += 1
                         continue
                     else:
-                        logger.debug("Team match failed: side=%r home=%r away=%r", row["side"], home_name, away_name)
+                        errors.append(f"Team match failed for game {mlb_id}: side={side!r} home={home_name!r} away={away_name!r}")
 
-            # ── Strategy 2: team-name fuzzy lookup (PLACED bets / fallback) ──
-            if game_date:
-                away_name_guess, home_name_guess = _parse_teams_from_game_id(row["game_id"])
-                if away_name_guess or home_name_guess:
-                    day_games = _fetch_games_for_date(game_date)
-                    for g in day_games:
-                        if g.get("status") != "Final":
-                            continue
-                        h = g.get("home_name", "").lower()
-                        a = g.get("away_name", "").lower()
-                        if not (_name_match(home_name_guess, h) or _name_match(away_name_guess, a)):
-                            continue
-                        hs = int(g.get("home_score", 0) or 0)
-                        as_ = int(g.get("away_score", 0) or 0)
-                        won = _team_won(row["side"], h, a, hs, as_)
-                        if won is not None:
-                            _write_result(conn, row, won)
-                            graded += 1
-                            break
+            # ── Strategy 2: search day's schedule by side (team name) ────
+            # Works for both PLACED bets and as a fallback for model picks.
+            if game_date and side:
+                day_games = _fetch_games_for_date(game_date)
+                matched = False
+                for g in day_games:
+                    if g.get("status") not in _FINAL_STATUSES:
+                        continue
+                    h = g.get("home_name", "").lower()
+                    a = g.get("away_name", "").lower()
+                    # Match by side team name OR by parsed game_id teams
+                    side_match = _name_match(side, h) or _name_match(side, a)
+                    # Also try game_id team names for PLACED bets
+                    away_guess, home_guess = _parse_teams_from_game_id(row["game_id"])
+                    id_match = (away_guess and (_name_match(away_guess, a) or _name_match(away_guess, h))) or \
+                               (home_guess and (_name_match(home_guess, h) or _name_match(home_guess, a)))
+                    if not (side_match or id_match):
+                        continue
+                    hs = int(g.get("home_score", 0) or 0)
+                    as_ = int(g.get("away_score", 0) or 0)
+                    won = _team_won(side, h, a, hs, as_)
+                    if won is not None:
+                        _write_result(conn, row, won)
+                        graded += 1
+                        matched = True
+                        break
+                if not matched:
+                    if game_date == today:
+                        pending_today += 1
                     else:
                         skipped += 1
-                else:
-                    skipped += 1
+            elif not mlb_id:
+                skipped += 1
 
     if graded:
         logger.info("Graded %d pending picks.", graded)
@@ -314,11 +334,20 @@ def grade_pending_picks() -> dict:
         except Exception as e:
             logger.debug("Post-grade retrain skipped: %s", e)
 
+    parts = [f"Graded {graded}"]
+    if pending_today:
+        parts.append(f"{pending_today} awaiting tonight's results")
+    if skipped:
+        parts.append(f"{skipped} no match/postponed")
+    if errors:
+        parts.append(f"{len(errors)} API errors")
+
     return {
         "graded": graded,
         "errors": errors,
         "skipped": skipped,
-        "message": f"Graded {graded}, skipped {skipped} (still pending/no match)" + (f", {len(errors)} API errors" if errors else ""),
+        "pending_today": pending_today,
+        "message": " · ".join(parts),
     }
 
 
