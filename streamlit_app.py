@@ -1800,7 +1800,11 @@ def render_record_bet_tab(picks: list = None, parlays: list = None, nrfi_ranked:
                         parlay_legs.append(r)
 
                 if not model_rows:
-                    st.caption("No picks in the last 7 days yet.")
+                    st.info(
+                        "No picks recorded in the last 7 days. "
+                        "Today's picks are shown as **Pending** until games finish tonight — "
+                        "results appear automatically after each game ends."
+                    )
 
                 if single_picks:
                     st.markdown("#### 🎯 Single Picks")

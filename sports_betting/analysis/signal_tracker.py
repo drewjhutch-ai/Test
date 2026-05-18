@@ -119,11 +119,25 @@ def auto_record_model_picks(picks: list, parlays: list, date_str: str) -> int:
     today = date_str or datetime.now().strftime("%Y-%m-%d")
 
     with get_db() as conn:
+        # Remove duplicate MODEL_PICK rows (same side+market+date) that may have
+        # been created before the market-specific game_id fix, keeping only the
+        # most recent row per (side, market, date).
+        conn.execute("""
+            DELETE FROM value_bets
+            WHERE confidence = 'MODEL_PICK'
+              AND id NOT IN (
+                SELECT MAX(id)
+                FROM value_bets
+                WHERE confidence = 'MODEL_PICK'
+                GROUP BY side, market, date(detected_at)
+              )
+        """)
+
         # ── Single picks (POTD + all active picks) ──────────────────────
         for pick in picks:
             if getattr(pick, "tier", "SKIP") == "SKIP":
                 continue
-            game_id = f"model_{today}_{getattr(pick, 'game_id', 'unknown')}"
+            raw_game_id = getattr(pick, 'game_id', 'unknown')
             mkt = getattr(pick, "recommended_market", "") or getattr(pick, "proposed_market", "full_game_ml")
             backing = getattr(pick, "backing_team", "")
             tier = getattr(pick, "tier", "LEAN")
@@ -132,10 +146,15 @@ def auto_record_model_picks(picks: list, parlays: list, date_str: str) -> int:
             ev = getattr(pick, "ev_pct", 0.0)
             prob = 1.0 - getattr(pick, "losing_pct", 0.5)
 
-            # Deduplicate: skip if already recorded for today
+            # Include market in game_id so each (game, team, market) combo
+            # is stored separately without duplicating identical rows.
+            mkt_slug = mkt.replace(" ", "_").replace(",", "_")[:20]
+            game_id = f"model_{today}_{raw_game_id}_{mkt_slug}"
+
+            # Deduplicate: skip if already recorded for today with same side+market
             existing = conn.execute(
-                "SELECT id FROM value_bets WHERE game_id = ? AND confidence = 'MODEL_PICK' LIMIT 1",
-                (game_id,)
+                "SELECT id FROM value_bets WHERE game_id = ? AND confidence = 'MODEL_PICK' AND side = ? LIMIT 1",
+                (game_id, backing.lower())
             ).fetchone()
             if existing:
                 continue
