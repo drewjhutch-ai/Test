@@ -65,8 +65,15 @@ def cached_model_roi():
                 WHERE result IS NOT NULL
                   AND confidence IN ('MODEL_PICK', 'MODEL_PARLAY')
             """).fetchone()
+            pending_row = conn.execute("""
+                SELECT COUNT(*) AS pending
+                FROM value_bets
+                WHERE result IS NULL
+                  AND confidence IN ('MODEL_PICK', 'MODEL_PARLAY')
+            """).fetchone()
+        pending = int(pending_row["pending"]) if pending_row else 0
         if not row or not row["total"]:
-            return {}
+            return {"pending": pending}
         staked = row["staked"] or 1
         profit = row["profit"] or 0
         return {
@@ -74,6 +81,7 @@ def cached_model_roi():
             "hit_rate": round(row["hit_rate"] or 0, 4),
             "roi": round(profit / staked * 100, 2),
             "profit": round(profit, 2),
+            "pending": pending,
         }
     except Exception:
         return {}
@@ -397,31 +405,45 @@ def render_header(roi: dict):
 
 def render_model_header(mroi: dict):
     """Separate header tracking the model's own autonomous pick record."""
-    if not mroi:
+    pending = mroi.get("pending", 0)
+    wins    = mroi.get("wins", 0)
+    losses  = mroi.get("losses", 0)
+    total   = mroi.get("total", 0)
+
+    # No graded picks yet — but show tracking status so user knows picks ARE recorded
+    if not total:
+        pending_txt = f"{pending} picks tracked, awaiting game results" if pending else "Run the model to start tracking picks"
         st.html(
-            '<div style="background:#0d1117;border:1px solid #1e293b;border-radius:12px;'
-            'padding:14px 24px;margin-bottom:16px;display:flex;align-items:center;gap:12px">'
-            '<span style="color:#8b5cf6;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.1em">🤖 AI Model Record</span>'
-            '<span style="color:#334155;font-size:12px;margin-left:8px">No graded model picks yet — grades update automatically after each game ends</span>'
-            '</div>'
+            f'<div style="background:#0d1117;border:1px solid #1e293b;border-left:3px solid #8b5cf6;'
+            f'border-radius:12px;padding:14px 24px;margin-bottom:16px;'
+            f'display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">'
+            f'<div>'
+            f'<div style="color:#8b5cf6;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.12em">🤖 AI Model Record</div>'
+            f'<div style="color:#f1f5f9;font-size:22px;font-weight:800;margin-top:2px">0–0</div>'
+            f'</div>'
+            f'<div style="color:#475569;font-size:12px">{pending_txt} · grades appear after each game ends</div>'
+            f'</div>'
         )
         return
-    wins   = mroi.get("wins", 0)
-    losses = mroi.get("losses", 0)
-    total  = mroi.get("total", 0)
+
     hit    = mroi.get("hit_rate", 0)
     roi    = mroi.get("roi", 0)
     profit = mroi.get("profit", 0)
     roi_color    = "#10b981" if roi >= 0 else "#ef4444"
     profit_color = "#10b981" if profit >= 0 else "#ef4444"
+    pending_badge = (
+        f'<span style="background:#1e293b;color:#64748b;font-size:10px;padding:2px 8px;'
+        f'border-radius:999px;margin-left:8px">{pending} pending</span>'
+    ) if pending else ""
     st.html(
         f'<div style="background:#0d1117;border:1px solid #1e293b;border-left:3px solid #8b5cf6;'
         f'border-radius:12px;padding:16px 28px;margin-bottom:16px">'
         f'<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:16px">'
         f'<div>'
         f'<div style="color:#8b5cf6;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.12em">🤖 AI Model Record</div>'
-        f'<div style="color:#f1f5f9;font-size:26px;font-weight:800;line-height:1.1;margin-top:2px">{wins}–{losses}</div>'
-        f'<div style="color:#475569;font-size:11px;margin-top:2px">{total} graded picks</div>'
+        f'<div style="color:#f1f5f9;font-size:26px;font-weight:800;line-height:1.1;margin-top:2px">'
+        f'{wins}–{losses}{pending_badge}</div>'
+        f'<div style="color:#475569;font-size:11px;margin-top:2px">{total} graded · {pending} awaiting results</div>'
         f'</div>'
         f'<div style="text-align:center">'
         f'<div style="color:#475569;font-size:10px;text-transform:uppercase;letter-spacing:0.1em">Hit Rate</div>'
@@ -1730,35 +1752,46 @@ def render_record_bet_tab(picks: list = None, parlays: list = None, nrfi_ranked:
         # ── Model Picks (auto-tracked) ────────────────────────────────
         with hist_tab_model:
             with get_db() as conn:
-                # No row limit — show full lifetime history
-                model_rows = conn.execute("""
+                # All-time for summary metrics
+                all_model_rows = conn.execute("""
                     SELECT game_id, market, side, book_price, model_probability,
                            edge, result, detected_at, factors, confidence
                     FROM value_bets
                     WHERE confidence IN ('MODEL_PICK', 'MODEL_PARLAY')
                     ORDER BY detected_at DESC
                 """).fetchall()
+                # Last 7 days for the detail view
+                model_rows = conn.execute("""
+                    SELECT game_id, market, side, book_price, model_probability,
+                           edge, result, detected_at, factors, confidence
+                    FROM value_bets
+                    WHERE confidence IN ('MODEL_PICK', 'MODEL_PARLAY')
+                      AND detected_at >= datetime('now', '-7 days')
+                    ORDER BY detected_at DESC
+                """).fetchall()
 
-            if not model_rows:
+            if not all_model_rows:
                 st.info("No model picks tracked yet — run the model to start auto-tracking picks and parlays.")
             else:
-                # ── Lifetime performance summary ──────────────────────
-                graded   = [r for r in model_rows if r[6] in ("WIN", "LOSS")]
-                wins     = sum(1 for r in graded if r[6] == "WIN")
-                losses   = len(graded) - wins
-                pending  = sum(1 for r in model_rows if not r[6])
-                win_rate = wins / len(graded) if graded else 0.0
+                # ── All-time performance summary ──────────────────────
+                graded_all = [r for r in all_model_rows if r[6] in ("WIN", "LOSS")]
+                wins_all   = sum(1 for r in graded_all if r[6] == "WIN")
+                losses_all = len(graded_all) - wins_all
+                pending_all = sum(1 for r in all_model_rows if not r[6])
+                win_rate   = wins_all / len(graded_all) if graded_all else 0.0
 
                 c1, c2, c3, c4 = st.columns(4)
-                c1.metric("All-Time Picks", len(model_rows))
-                c2.metric("Win Rate", f"{win_rate:.0%}" if graded else "—",
-                          f"{wins}W / {losses}L" if graded else None)
-                c3.metric("Graded", len(graded))
-                c4.metric("Pending Grade", pending)
+                c1.metric("All-Time Picks", len(all_model_rows))
+                c2.metric("Win Rate", f"{win_rate:.0%}" if graded_all else "—",
+                          f"{wins_all}W / {losses_all}L" if graded_all else None)
+                c3.metric("Graded", len(graded_all))
+                c4.metric("Awaiting Results", pending_all,
+                          delta="grades auto-update after games end" if pending_all else None,
+                          delta_color="off")
 
                 st.markdown("---")
-
-                # Separate single picks and parlay legs
+                st.markdown("#### 📅 Last 7 Days")
+                # Separate single picks and parlay legs from last-7-days window
                 single_picks, parlay_legs = [], []
                 for r in model_rows:
                     if r[9] == "MODEL_PICK":
@@ -1766,7 +1799,9 @@ def render_record_bet_tab(picks: list = None, parlays: list = None, nrfi_ranked:
                     else:
                         parlay_legs.append(r)
 
-                # --- Single picks ---
+                if not model_rows:
+                    st.caption("No picks in the last 7 days yet.")
+
                 if single_picks:
                     st.markdown("#### 🎯 Single Picks")
                     tier_colors_hist = {"STRONG": "#ef4444", "MEDIUM": "#f59e0b", "LEAN": "#94a3b8"}
