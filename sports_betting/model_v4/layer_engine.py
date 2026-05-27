@@ -78,6 +78,8 @@ class PitcherProfile:
     velocity_season: float = 0.0    # Season avg fastball velo
     spin_rate_7d: float = 0.0
     spin_rate_season: float = 0.0
+    pitch_mix_change: bool = False   # True if significant pitch mix change detected
+    pitch_mix_details: str = ""      # Human-readable description of the change
 
 
 @dataclass
@@ -102,6 +104,10 @@ class TeamProfile:
     framing_runs: float = 0.0       # Catcher framing runs above average
     bullpen_fatigue_score: float = 0.0   # 0-10; 7+ = fatigued
     bullpen_arms_available: int = 3      # Fresh arms with < 25 pitches last 3 days
+    team_oaa: float = 0.0               # Team Outs Above Average (season total)
+    defensive_run_value: float = 0.0    # Estimated runs saved: team_oaa * 0.82
+    travel_tz_change: float = 0.0       # Time-zone hours traveled (positive = westward)
+    travel_fatigue: bool = False         # True if 3+ tz westward travel
 
 
 @dataclass
@@ -112,6 +118,8 @@ class WeatherProfile:
     rain_pct: float = 0.0
     humidity: float = 50.0
     is_dome: bool = False
+    air_density_ratio: float = 1.0   # 1.0 = sea-level standard; <1 = thinner air
+    carry_boost_pct: float = 0.0     # Ball-carry boost from thin air (pct)
 
 
 @dataclass
@@ -1069,6 +1077,332 @@ def layer_16_umpire(pick: PickCandidate) -> LayerOutput:
     return out
 
 
+def layer_17_csw_stuff(pick: PickCandidate) -> LayerOutput:
+    """
+    CSW Rate + Stuff+ analysis for both starters.
+    CSW% (Called Strike + Whiff%) is the single best early-season K-rate predictor.
+    Stuff+ ≥ 110 = elite pitch quality; ≤ 88 = below-average arsenal.
+    Uses csw_rate and stuff_plus fields on PitcherProfile (populated by daily_runner).
+    """
+    out = LayerOutput(17, "CSW Rate & Stuff+", passed=True)
+
+    backing_sp  = pick.backing_pitcher
+    opposing_sp = pick.opposing_pitcher
+
+    notes: list[str] = []
+    factors: list[str] = []
+
+    # ── Backing pitcher strengths ─────────────────────────────────────
+    if backing_sp.csw_rate >= 0.30:
+        label = "elite_csw"
+        factors.append(label)
+        notes.append(
+            f"POSITIVE: {backing_sp.name} CSW% {backing_sp.csw_rate:.1%} ≥ 30% — "
+            "elite called-strike+whiff rate; K prop confidence elevated."
+        )
+        out.data["backing_elite_csw"] = True
+
+    elif backing_sp.csw_rate >= 0.285 and backing_sp.stuff_plus >= 110:
+        label = "strong_stuff"
+        factors.append(label)
+        notes.append(
+            f"POSITIVE: {backing_sp.name} CSW% {backing_sp.csw_rate:.1%} + "
+            f"Stuff+ {backing_sp.stuff_plus:.0f} — above-average arsenal combination."
+        )
+        out.data["backing_strong_stuff"] = True
+
+    # ── Opposing pitcher weaknesses ───────────────────────────────────
+    if opposing_sp.csw_rate <= 0.24:
+        label = "weak_csw_opp"
+        factors.append(label)
+        notes.append(
+            f"POSITIVE (offense): {opposing_sp.name} CSW% {opposing_sp.csw_rate:.1%} ≤ 24% — "
+            "poor called-strike+whiff rate; backing offense should make contact and rebound."
+        )
+        out.data["opp_weak_csw"] = True
+
+    if opposing_sp.stuff_plus <= 88:
+        notes.append(
+            f"MILD POSITIVE: {opposing_sp.name} Stuff+ {opposing_sp.stuff_plus:.0f} ≤ 88 — "
+            "below-average arsenal; modest additional confidence for backing offense."
+        )
+        out.data["opp_poor_stuff"] = True
+
+    out.notes.extend(notes)
+    out.data["csw_factors"] = factors
+    pick.factors.extend(factors)
+
+    if not notes:
+        out.notes.append(
+            f"Layer 17: CSW/Stuff+ — {backing_sp.name} {backing_sp.csw_rate:.1%} CSW / "
+            f"Stuff+ {backing_sp.stuff_plus:.0f} (no strong signals)."
+        )
+    return out
+
+
+def layer_18_air_density(pick: PickCandidate) -> LayerOutput:
+    """
+    Advanced air density park factor analysis.
+    Uses air_density_ratio and carry_boost_pct from WeatherProfile.
+    Only meaningful for outdoor stadiums (is_dome=False).
+    """
+    out = LayerOutput(18, "Air Density Park Factor", passed=True)
+
+    if pick.weather.is_dome or is_dome(pick.home_team):
+        out.notes.append("Layer 18: Dome/retractable roof — air density not applicable.")
+        out.data["dome"] = True
+        return out
+
+    carry = pick.weather.carry_boost_pct
+    density = pick.weather.air_density_ratio
+
+    notes: list[str] = []
+    factors: list[str] = []
+
+    if carry >= 8.0:
+        label = "high_carry"
+        factors.append(label)
+        notes.append(
+            f"STRONG CARRY BOOST: Air density ratio {density:.4f} → "
+            f"{carry:.1f}% carry boost — significant HR/OVER lean; "
+            "pitching picks face elevated HR risk."
+        )
+        out.data["high_carry"] = True
+
+    elif carry >= 5.0:
+        label = "favorable_carry"
+        factors.append(label)
+        notes.append(
+            f"POSITIVE CARRY: Air density ratio {density:.4f} → "
+            f"{carry:.1f}% carry boost — favors over/offense picks."
+        )
+        out.data["favorable_carry"] = True
+
+    elif carry <= -3.0:
+        label = "suppressed_carry"
+        factors.append(label)
+        notes.append(
+            f"SUPPRESSED CARRY: Air density ratio {density:.4f} → "
+            f"{carry:.1f}% carry penalty — favors under/pitching picks."
+        )
+        out.data["suppressed_carry"] = True
+
+    else:
+        notes.append(
+            f"Layer 18: Air density ratio {density:.4f} → carry boost {carry:.1f}% (neutral)."
+        )
+
+    out.notes.extend(notes)
+    out.data["air_density_factors"] = factors
+    pick.factors.extend(factors)
+    return out
+
+
+def layer_19_travel(pick: PickCandidate) -> LayerOutput:
+    """
+    Travel / time-zone fatigue analysis.
+    Uses travel_tz_change and travel_fatigue fields on TeamProfile.
+    Strongest signal: 3+ time-zone westward travel.
+    """
+    out = LayerOutput(19, "Travel / Time-Zone Fatigue", passed=True)
+
+    backing_tp  = pick.backing_team_profile
+    opposing_tp = (
+        pick.away_team_profile if pick.backing_team == pick.home_team
+        else pick.home_team_profile
+    )
+
+    notes: list[str] = []
+    factors: list[str] = []
+
+    # ── Backing team fatigue ──────────────────────────────────────────
+    if backing_tp.travel_fatigue:
+        label = "travel_fatigue"
+        factors.append(label)
+        notes.append(
+            f"WARN: {backing_tp.name} traveled {backing_tp.travel_tz_change:.0f} time zones "
+            "westward — 3+ tz cross-country fatigue. Mild negative for backing side."
+        )
+        out.data["backing_travel_fatigue"] = True
+
+    elif backing_tp.travel_tz_change >= 2.0:
+        notes.append(
+            f"NOTE: {backing_tp.name} traveled {backing_tp.travel_tz_change:.0f} time zones "
+            "westward (2 tz — less severe; monitor but no factor change)."
+        )
+
+    # ── Opposing team fatigue ─────────────────────────────────────────
+    if opposing_tp.travel_fatigue:
+        label = "opp_travel_fatigue"
+        factors.append(label)
+        notes.append(
+            f"POSITIVE: {opposing_tp.name} (opponent) traveled "
+            f"{opposing_tp.travel_tz_change:.0f} time zones westward — "
+            "significant fatigue disadvantage for opposing side."
+        )
+        out.data["opp_travel_fatigue"] = True
+
+    elif opposing_tp.travel_tz_change >= 2.0:
+        notes.append(
+            f"MILD POSITIVE: {opposing_tp.name} traveled "
+            f"{opposing_tp.travel_tz_change:.0f} tz westward (2 tz — mild disadvantage)."
+        )
+
+    out.notes.extend(notes)
+    out.data["travel_factors"] = factors
+    pick.factors.extend(factors)
+
+    if not notes:
+        out.notes.append("Layer 19: No significant travel fatigue for either team.")
+    return out
+
+
+def layer_20_defense(pick: PickCandidate) -> LayerOutput:
+    """
+    Team defensive metrics (OAA) impact on pitcher ERA vs FIP discrepancy.
+    Elite defense suppresses ERA below FIP; poor defense inflates it.
+    Uses team_oaa and defensive_run_value fields on TeamProfile.
+    """
+    out = LayerOutput(20, "Defensive Metrics (OAA)", passed=True)
+
+    backing_tp  = pick.backing_team_profile
+    backing_sp  = pick.backing_pitcher
+
+    notes: list[str] = []
+    factors: list[str] = []
+
+    team_oaa = backing_tp.team_oaa
+
+    # ── Elite / above-average defense ────────────────────────────────
+    if team_oaa >= 15:
+        label = "elite_defense"
+        factors.append(label)
+        notes.append(
+            f"STRONG POSITIVE: {backing_tp.name} team OAA +{team_oaa:.0f} (elite) — "
+            "ERA will be lower than FIP suggests; defense turns batted balls into outs."
+        )
+        out.data["elite_defense"] = True
+
+    elif team_oaa >= 8:
+        label = "above_avg_defense"
+        factors.append(label)
+        notes.append(
+            f"MILD POSITIVE: {backing_tp.name} team OAA +{team_oaa:.0f} — "
+            "above-average defense provides ERA-suppression benefit."
+        )
+        out.data["above_avg_defense"] = True
+
+    elif team_oaa <= -12:
+        label = "poor_defense"
+        factors.append(label)
+        notes.append(
+            f"NEGATIVE: {backing_tp.name} team OAA {team_oaa:.0f} — "
+            "poor defense; ERA will be higher than FIP indicates."
+        )
+        out.data["poor_defense"] = True
+
+    # ── Pitcher–defense synergy: FIP < ERA + elite defense ───────────
+    fip_era_gap = backing_sp.era - backing_sp.fip  # positive = ERA > FIP (suppressed by defense)
+    if fip_era_gap >= 0.5 and team_oaa >= 10:
+        label = "pitcher_defense_synergy"
+        factors.append(label)
+        notes.append(
+            f"STRONG SYNERGY: {backing_sp.name} FIP {backing_sp.fip:.2f} < ERA "
+            f"{backing_sp.era:.2f} (gap +{fip_era_gap:.2f}) AND team OAA +{team_oaa:.0f} — "
+            "defense is actively depressing ERA; pitcher is better than raw ERA shows."
+        )
+        out.data["pitcher_defense_synergy"] = True
+
+    out.notes.extend(notes)
+    out.data["defense_factors"] = factors
+    pick.factors.extend(factors)
+
+    if not notes:
+        out.notes.append(
+            f"Layer 20: {backing_tp.name} OAA {team_oaa:+.0f} — no significant defensive signal."
+        )
+    return out
+
+
+def layer_21_pitch_mix(pick: PickCandidate) -> LayerOutput:
+    """
+    Pitch mix change detection — identifies pitchers who have added/dropped/abandoned
+    a pitch type in recent starts vs their season profile.
+    Uses pitch_mix_change and pitch_mix_details fields on PitcherProfile.
+    """
+    out = LayerOutput(21, "Pitch Mix Changes", passed=True)
+
+    backing_sp  = pick.backing_pitcher
+    opposing_sp = pick.opposing_pitcher
+
+    notes: list[str] = []
+    factors: list[str] = []
+
+    # ── Backing pitcher pitch mix ─────────────────────────────────────
+    if backing_sp.pitch_mix_change:
+        change_type = getattr(backing_sp, "_pitch_mix_change_type", None)
+        details     = backing_sp.pitch_mix_details
+
+        if change_type == "new_pitch":
+            label = "arsenal_expansion"
+            factors.append(label)
+            notes.append(
+                f"MILD POSITIVE: {backing_sp.name} has added a new pitch type — "
+                f"{details} — arsenal expansion can improve effectiveness."
+            )
+            out.data["backing_new_pitch"] = True
+
+        elif change_type == "primary_dropped":
+            label = "command_concern"
+            factors.append(label)
+            notes.append(
+                f"WARN: {backing_sp.name} primary pitch usage dropped significantly — "
+                f"{details} — possible command or health concern."
+            )
+            out.data["backing_command_concern"] = True
+
+        elif change_type == "pitch_abandoned":
+            notes.append(
+                f"NOTE: {backing_sp.name} has abandoned a pitch — {details}."
+            )
+
+    # ── Opposing pitcher pitch mix ────────────────────────────────────
+    if opposing_sp.pitch_mix_change:
+        change_type = getattr(opposing_sp, "_pitch_mix_change_type", None)
+        details     = opposing_sp.pitch_mix_details
+
+        if change_type == "pitch_abandoned":
+            label = "opp_pitch_abandoned"
+            factors.append(label)
+            notes.append(
+                f"POSITIVE (offense): {opposing_sp.name} abandoned a pitch — "
+                f"{details} — batters adapting, reduced arsenal for opponent."
+            )
+            out.data["opp_pitch_abandoned"] = True
+
+        elif change_type == "primary_dropped":
+            label = "opp_command_loss"
+            factors.append(label)
+            notes.append(
+                f"POSITIVE (offense): {opposing_sp.name} primary pitch usage dropped — "
+                f"{details} — command regression; favorable for backing offense."
+            )
+            out.data["opp_command_loss"] = True
+
+        elif change_type == "new_pitch":
+            notes.append(
+                f"NOTE: {opposing_sp.name} added new pitch — {details}. Monitor effectiveness."
+            )
+
+    out.notes.extend(notes)
+    out.data["pitch_mix_factors"] = factors
+    pick.factors.extend(factors)
+
+    if not notes:
+        out.notes.append("Layer 21: No significant pitch mix changes detected for either starter.")
+    return out
+
+
 def _extract_keywords_for_weight(factor_str: str) -> list[str]:
     """Map a factor string to weight lookup keys (mirrors weight_trainer._extract_factor_keywords)."""
     kws = []
@@ -1131,10 +1465,11 @@ def run_all_layers(
     line_moved_toward_backing: bool | None = None,
 ) -> PickCandidate:
     """
-    Execute all 16 layers in sequence for one pick candidate.
+    Execute all 21 layers in sequence for one pick candidate.
     Returns the pick with tier, market, factors, and all layer outputs attached.
     Layers 1-12: core analysis pipeline.
     Layers 13-16: Tier 1 enrichment (xStats, velocity, catcher framing, umpire).
+    Layers 17-21: Tier 2 enrichment (CSW/Stuff+, air density, travel, defense, pitch mix).
     """
     layers_fn = [
         lambda: layer_1_identity(pick),
@@ -1153,6 +1488,12 @@ def run_all_layers(
         lambda: layer_14_velocity(pick),
         lambda: layer_15_catcher_framing(pick),
         lambda: layer_16_umpire(pick),
+        # Tier 2 enrichment layers — informational, additive factors only
+        lambda: layer_17_csw_stuff(pick),
+        lambda: layer_18_air_density(pick),
+        lambda: layer_19_travel(pick),
+        lambda: layer_20_defense(pick),
+        lambda: layer_21_pitch_mix(pick),
     ]
 
     for fn in layers_fn:

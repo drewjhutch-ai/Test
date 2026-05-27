@@ -43,11 +43,18 @@ from ..collectors.fangraphs_collector import (
     get_pitcher_velocity_trends, check_velocity_trend,
     get_pitcher_hr_vulnerability, get_team_xwoba_luck,
 )
-from ..collectors.xstats_collector import get_pitcher_xstats, get_team_xwoba
+from ..collectors.xstats_collector import (
+    get_pitcher_xstats, get_team_xwoba,
+    get_pitcher_csw, get_stuff_plus,
+)
 from ..collectors.velocity_tracker import get_velocity_data
 from ..collectors.catcher_framing_collector import get_framing_by_team
 from ..collectors.umpire_collector import get_todays_umpires
 from ..collectors.bullpen_fatigue_collector import get_bullpen_fatigue
+from ..collectors.air_density_collector import get_air_density_for_game
+from ..collectors.travel_fatigue_collector import get_travel_fatigue
+from ..collectors.defensive_metrics_collector import get_team_oaa
+from ..collectors.pitch_mix_collector import get_pitch_mix_changes
 from ..signals.aggregator import run_all_signals, build_signal_factors
 
 logger = logging.getLogger(__name__)
@@ -144,6 +151,14 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
     t1_framing_by_team = get_framing_by_team()
     t1_umpires         = get_todays_umpires(date_str)
     t1_bullpen_fatigue = get_bullpen_fatigue()
+
+    # Tier 2 enrichment data (fetched once, reused per game)
+    logger.info("Fetching Tier 2 enrichment data (CSW, Stuff+, travel, defense, pitch mix)...")
+    t2_csw_data      = get_pitcher_csw()
+    t2_stuff_data    = get_stuff_plus()
+    t2_travel_data   = get_travel_fatigue(date_str)
+    t2_defense_data  = get_team_oaa()
+    t2_pitch_mix_data = get_pitch_mix_changes()
 
     # ------------------------------------------------------------------ #
     # LAYERS 1-12 — Full analysis per game                               #
@@ -321,6 +336,18 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
             t1_framing_by_team=t1_framing_by_team,
             t1_umpires=t1_umpires,
             t1_bullpen_fatigue=t1_bullpen_fatigue,
+        )
+
+        # ── Tier 2: inject enrichment data into pick/profiles ────────
+        _inject_tier2_data(
+            pick=pick,
+            home=home,
+            game_id=game_id,
+            t2_csw_data=t2_csw_data,
+            t2_stuff_data=t2_stuff_data,
+            t2_travel_data=t2_travel_data,
+            t2_defense_data=t2_defense_data,
+            t2_pitch_mix_data=t2_pitch_mix_data,
         )
 
         pick = run_all_layers(
@@ -748,3 +775,86 @@ def _inject_tier1_data(
         if fatigue_entry:
             team_profile.bullpen_fatigue_score  = fatigue_entry.get("fatigue_score",   0.0)
             team_profile.bullpen_arms_available = fatigue_entry.get("arms_available",  3)
+
+
+# ------------------------------------------------------------------ #
+#  Tier 2 enrichment injection                                        #
+# ------------------------------------------------------------------ #
+
+def _inject_tier2_data(
+    pick,
+    home: str,
+    game_id: str,
+    t2_csw_data: dict,
+    t2_stuff_data: dict,
+    t2_travel_data: dict,
+    t2_defense_data: dict,
+    t2_pitch_mix_data: dict,
+) -> None:
+    """
+    Mutates PitcherProfile fields, TeamProfile fields, and WeatherProfile on the pick
+    with Tier 2 enrichment data fetched before the per-game loop.
+
+    Follows the exact same pattern as _inject_tier1_data: try full name first,
+    fall back to last name only; only overwrite when real data is present.
+    """
+    # ── 1. CSW% and Stuff+ into PitcherProfile ────────────────────────
+    for pitcher in (pick.home_pitcher, pick.away_pitcher):
+        if pitcher.name in ("TBD", ""):
+            continue
+
+        # CSW rate
+        csw = t2_csw_data.get(pitcher.name)
+        if csw is None:
+            last = pitcher.name.split()[-1]
+            csw = t2_csw_data.get(last)
+        if csw is not None and csw > 0:
+            pitcher.csw_rate = csw
+
+        # Stuff+
+        stuff = t2_stuff_data.get(pitcher.name)
+        if stuff is None:
+            last = pitcher.name.split()[-1]
+            stuff = t2_stuff_data.get(last)
+        if stuff is not None and stuff > 0:
+            pitcher.stuff_plus = stuff
+
+    # ── 2. Air density into WeatherProfile ────────────────────────────
+    # Air density is fetched per game (home team + approximate game time)
+    try:
+        air = get_air_density_for_game(home_team=home)
+        if air:
+            pick.weather.air_density_ratio = air.get("air_density_ratio", 1.0)
+            pick.weather.carry_boost_pct   = air.get("carry_boost_pct",   0.0)
+    except Exception as exc:
+        logger.debug("_inject_tier2_data: air density failed for %s: %s", home, exc)
+
+    # ── 3. Travel fatigue into TeamProfile ────────────────────────────
+    for team_profile in (pick.home_team_profile, pick.away_team_profile):
+        travel_entry = t2_travel_data.get(team_profile.name, {})
+        if travel_entry:
+            team_profile.travel_tz_change = travel_entry.get("tz_change_hours", 0.0)
+            team_profile.travel_fatigue   = travel_entry.get("fatigue_flag",    False)
+
+    # ── 4. Defensive OAA into TeamProfile ─────────────────────────────
+    for team_profile in (pick.home_team_profile, pick.away_team_profile):
+        # Try 3-letter abbreviation first (matches Baseball Savant format)
+        team_abbr = team_profile.name[:3].upper()
+        defense_entry = t2_defense_data.get(team_abbr, {})
+        if defense_entry:
+            team_profile.team_oaa             = defense_entry.get("total_oaa",           0.0)
+            team_profile.defensive_run_value   = defense_entry.get("defensive_run_value", 0.0)
+
+    # ── 5. Pitch mix changes into PitcherProfile ──────────────────────
+    for pitcher in (pick.home_pitcher, pick.away_pitcher):
+        if pitcher.name in ("TBD", ""):
+            continue
+        mix_entry = t2_pitch_mix_data.get(pitcher.name)
+        if mix_entry is None:
+            last = pitcher.name.split()[-1]
+            mix_entry = t2_pitch_mix_data.get(last)
+        if mix_entry:
+            pitcher.pitch_mix_change  = mix_entry.get("mix_change",  False)
+            pitcher.pitch_mix_details = mix_entry.get("details",     "")
+            # Store change_type as a custom attr for layer_21 to read
+            pitcher._pitch_mix_change_type = mix_entry.get("change_type", None)  # type: ignore[attr-defined]
