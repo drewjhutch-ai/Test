@@ -1,7 +1,7 @@
 """
-Odds collector using The Odds API.
-Pulls live lines from DraftKings and multiple books simultaneously.
-Tracks opening lines vs. current lines for movement analysis.
+Odds collector.
+Primary source: ESPN public scoreboard API (free, no key, no cloud blocks).
+Fallback: The Odds API (requires ODDS_API_KEY; 500 req/month on free tier).
 """
 import logging
 import requests
@@ -17,16 +17,28 @@ from ..database import (
 
 logger = logging.getLogger(__name__)
 
+_ESPN_URL = "https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard"
+_ESPN_HEADERS = {"User-Agent": "Mozilla/5.0"}
+
+# Normalise ESPN provider names → book keys used elsewhere in the model
+_ESPN_BOOK_MAP = {
+    "draftkings": "draftkings",
+    "fanduel":    "fanduel",
+    "betmgm":     "betmgm",
+    "caesars":    "williamhill_us",
+    "pointsbet":  "pointsbet",
+    "barstool":   "barstool_sportsbook",
+    "betrivers":  "betrivers",
+}
+
 
 def american_to_decimal(american: int) -> float:
-    """Convert American odds to decimal odds."""
     if american > 0:
         return round(1 + american / 100, 4)
     return round(1 + 100 / abs(american), 4)
 
 
 def decimal_to_implied_prob(decimal: float) -> float:
-    """Convert decimal odds to implied probability (no vig)."""
     return round(1 / decimal, 4)
 
 
@@ -35,44 +47,144 @@ def american_to_implied_prob(american: int) -> float:
 
 
 def remove_vig(prob_a: float, prob_b: float) -> tuple[float, float]:
-    """Remove the bookmaker's vig to get fair probabilities."""
     total = prob_a + prob_b
     return round(prob_a / total, 4), round(prob_b / total, 4)
 
 
+# ------------------------------------------------------------------ #
+#  ESPN primary source                                                 #
+# ------------------------------------------------------------------ #
+
+def _fetch_espn_odds() -> list[dict]:
+    """
+    Pull moneylines and totals from ESPN's public scoreboard API.
+    No key required, not blocked on cloud IPs.
+    Returns data in the same shape parse_and_store_odds expects.
+    """
+    try:
+        resp = requests.get(_ESPN_URL, headers=_ESPN_HEADERS, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        logger.warning("ESPN odds fetch failed: %s", exc)
+        return []
+
+    events = []
+    for event in data.get("events", []):
+        comp = (event.get("competitions") or [{}])[0]
+
+        home_team = away_team = ""
+        for side in comp.get("competitors", []):
+            name = side.get("team", {}).get("displayName", "")
+            if side.get("homeAway") == "home":
+                home_team = name
+            else:
+                away_team = name
+
+        if not home_team or not away_team:
+            continue
+
+        bookmakers = []
+        for odds in comp.get("odds", []):
+            provider_name = odds.get("provider", {}).get("name", "espn").lower()
+            # Normalise to a known book key; fall back to sanitised provider name
+            book_key = _ESPN_BOOK_MAP.get(
+                provider_name.replace(" ", "").replace("'", ""),
+                provider_name.replace(" ", "_"),
+            )
+
+            home_ml  = odds.get("homeTeamOdds", {}).get("moneyLine")
+            away_ml  = odds.get("awayTeamOdds", {}).get("moneyLine")
+            ou_line  = odds.get("overUnder")
+            over_odds  = odds.get("overOdds",  -110)
+            under_odds = odds.get("underOdds", -110)
+
+            markets = []
+            if home_ml and away_ml:
+                markets.append({
+                    "key": "h2h",
+                    "outcomes": [
+                        {"name": home_team, "price": int(home_ml)},
+                        {"name": away_team, "price": int(away_ml)},
+                    ],
+                })
+            if ou_line:
+                markets.append({
+                    "key": "totals",
+                    "outcomes": [
+                        {"name": "Over",  "price": int(over_odds  or -110), "point": ou_line},
+                        {"name": "Under", "price": int(under_odds or -110), "point": ou_line},
+                    ],
+                })
+
+            if markets:
+                bookmakers.append({"key": book_key, "markets": markets})
+
+        # If ESPN doesn't carry any provider line, synthesise a neutral "espn" entry
+        # so the game still appears in the odds pipeline
+        if not bookmakers:
+            bookmakers.append({
+                "key": "espn",
+                "markets": [],
+            })
+
+        events.append({
+            "id": str(event.get("id", "")),
+            "home_team": home_team,
+            "away_team": away_team,
+            "commence_time": comp.get("date", ""),
+            "bookmakers": bookmakers,
+        })
+
+    logger.info("ESPN odds: %d games", len(events))
+    return events
+
+
+# ------------------------------------------------------------------ #
+#  Public interface                                                     #
+# ------------------------------------------------------------------ #
+
 def get_live_odds() -> list[dict]:
-    """Fetch live odds from The Odds API for all configured books."""
+    """
+    Fetch live odds. Tries ESPN first (free, no quota).
+    Falls back to The Odds API when ODDS_API_KEY is set and ESPN returns nothing.
+    """
+    # --- Primary: ESPN ---
+    espn = _fetch_espn_odds()
+    if espn:
+        return espn
+
+    # --- Fallback: The Odds API ---
     if not ODDS_API_KEY:
-        logger.warning("No ODDS_API_KEY set. Using mock data.")
+        logger.warning("No ODDS_API_KEY and ESPN returned nothing — using mock data.")
         return _mock_odds()
 
     try:
         url = f"{ODDS_API_BASE}/sports/{ODDS_SPORT}/odds"
         params = {
-            "apiKey": ODDS_API_KEY,
-            "regions": ODDS_REGIONS,
-            "markets": "h2h,spreads,totals",
+            "apiKey":     ODDS_API_KEY,
+            "regions":    ODDS_REGIONS,
+            "markets":    "h2h,spreads,totals",
             "oddsFormat": "american",
             "bookmakers": ",".join(ODDS_BOOKS),
         }
         resp = requests.get(url, params=params, timeout=15)
         resp.raise_for_status()
-
         remaining = resp.headers.get("x-requests-remaining", "?")
-        logger.info("Odds API request succeeded. Remaining quota: %s", remaining)
-
+        logger.info("Odds API fallback succeeded. Remaining quota: %s", remaining)
         return resp.json()
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 401:
-            logger.error("Invalid Odds API key")
+            logger.error("Odds API: invalid key or quota exceeded — odds unavailable")
         elif e.response.status_code == 429:
-            logger.error("Odds API rate limit exceeded")
+            logger.error("Odds API: rate limit hit")
         else:
             logger.error("Odds API HTTP error: %s", e)
         return []
     except Exception as e:
-        logger.error("Failed to fetch odds: %s", e)
+        logger.error("Odds API fetch failed: %s", e)
         return []
+
 
 
 def parse_and_store_odds(raw_odds: list[dict]) -> list[dict]:
