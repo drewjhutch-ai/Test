@@ -1,16 +1,14 @@
 """
-xStats collector — fetches pitcher xERA/xFIP/SIERA and team xwOBA from Baseball Savant.
-Also fetches CSW% and Stuff+ from FanGraphs.
+xStats collector — fetches pitcher xERA/xFIP/SIERA and team xwOBA from MLB Stats API.
+Also provides CSW% and Stuff+ proxies derived from K%, BB%, and strike%.
 Cached module-level with ~6-hour TTL.
 """
 from __future__ import annotations
-import csv
-import io
 import logging
+import math
 import time
 
 import requests
-from .savant_headers import SAVANT_HEADERS
 
 logger = logging.getLogger(__name__)
 
@@ -26,50 +24,76 @@ _CSW_CACHE_TS: float = 0.0
 _STUFF_CACHE: dict = {}
 _STUFF_CACHE_TS: float = 0.0
 
+# Shared pitcher splits cache (avoids re-fetching for each function)
+_SPLITS_CACHE: list = []
+_SPLITS_CACHE_TS: float = 0.0
+
 _TTL: float = 6 * 3600  # 6 hours
 
 _PITCHER_URL = (
-    "https://baseballsavant.mlb.com/leaderboard/expected_statistics"
-    "?type=pitcher&year=2026&position=&team=&min=25&csv=true"
+    "https://statsapi.mlb.com/api/v1/stats"
+    "?stats=season&group=pitching&gameType=R&season=2026"
+    "&playerPool=ALL&limit=500&sportId=1"
 )
 _BATTER_URL = (
-    "https://baseballsavant.mlb.com/leaderboard/expected_statistics"
-    "?type=batter&year=2026&position=&team=&min=25&csv=true"
+    "https://statsapi.mlb.com/api/v1/stats"
+    "?stats=season&group=hitting&gameType=R&season=2026"
+    "&playerPool=ALL&limit=1000&sportId=1"
 )
 
-# Baseball Savant pitch arsenal stats — replaces FanGraphs for CSW%/Stuff+
-# whiff_percent ≈ CSW% proxy; xwoba_against used as Stuff+ proxy
-_ARSENAL_URL = (
-    "https://baseballsavant.mlb.com/leaderboard/pitch-arsenal-stats"
-    "?type=pitcher&pitchType=&year=2026&team=&min=25&csv=true"
-)
-
-_HEADERS = SAVANT_HEADERS
+_HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 
-def _fetch_csv(url: str) -> list[dict]:
-    """Fetch a CSV URL and return list-of-dicts. Returns [] on any error."""
-    try:
-        resp = requests.get(url, headers=_HEADERS, timeout=12)
-        if resp.status_code == 403:
-            logger.warning("Baseball Savant returned 403 for %s", url)
-            return []
-        resp.raise_for_status()
-        text = resp.content.decode("utf-8-sig", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
-        rows = list(csv.DictReader(io.StringIO(text)))
-        if not rows:
-            logger.warning("xstats_collector: 0 rows from %s (response starts: %.120s)", url, text[:120])
-        return rows
-    except Exception as exc:
-        logger.warning("xstats_collector fetch failed (%s): %s", url, exc)
-        return []
-
-
-def _safe_float(val: str | None, default: float = 0.0) -> float:
+def _safe_float(val, default: float = 0.0) -> float:
     try:
         return float(val) if val not in (None, "", "null") else default
     except (ValueError, TypeError):
         return default
+
+
+def _parse_ip(ip_str) -> float:
+    """Convert innings pitched string like '34.1' to decimal innings."""
+    try:
+        s = str(ip_str)
+        if "." in s:
+            whole, frac = s.split(".", 1)
+            return float(whole) + int(frac) / 3.0
+        return float(s)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _fetch_pitcher_splits() -> list:
+    """Fetch pitcher season splits from MLB Stats API. Cached 6 hours."""
+    global _SPLITS_CACHE, _SPLITS_CACHE_TS
+    now = time.time()
+    if _SPLITS_CACHE and (now - _SPLITS_CACHE_TS) < _TTL:
+        return _SPLITS_CACHE
+
+    try:
+        resp = requests.get(_PITCHER_URL, headers=_HEADERS, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        splits = data["stats"][0]["splits"]
+        _SPLITS_CACHE = splits
+        _SPLITS_CACHE_TS = now
+        logger.info("xstats_collector: fetched %d pitcher splits", len(splits))
+        return splits
+    except Exception as exc:
+        logger.warning("xstats_collector: pitcher splits fetch failed: %s", exc)
+        return _SPLITS_CACHE
+
+
+def _fetch_batter_splits() -> list:
+    """Fetch batter season splits from MLB Stats API."""
+    try:
+        resp = requests.get(_BATTER_URL, headers=_HEADERS, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        return data["stats"][0]["splits"]
+    except Exception as exc:
+        logger.warning("xstats_collector: batter splits fetch failed: %s", exc)
+        return []
 
 
 # ------------------------------------------------------------------ #
@@ -78,38 +102,65 @@ def _safe_float(val: str | None, default: float = 0.0) -> float:
 
 def get_pitcher_xstats() -> dict[str, dict]:
     """
-    Returns dict keyed by player_name (last, first or full).
+    Returns dict keyed by pitcher full name and last name.
     Each value: {xera, xfip, siera, era}
+
+    Proxies:
+      xera  = ERA (actual from API)
+      xfip  = FIP = (13*HR + 3*(BB+HBP) - 2*K) / IP + 3.10, clamped [1.0, 9.0]
+      siera = ERA (no groundball data available)
+    Only includes pitchers with IP >= 5.
     """
     global _PITCHER_CACHE, _PITCHER_CACHE_TS
     now = time.time()
     if _PITCHER_CACHE and (now - _PITCHER_CACHE_TS) < _TTL:
         return _PITCHER_CACHE
 
-    rows = _fetch_csv(_PITCHER_URL)
+    splits = _fetch_pitcher_splits()
     result: dict[str, dict] = {}
-    for row in rows:
-        # Savant CSV columns vary; common names: last_name, first_name, xera, xfip, siera, era
-        last = row.get("last_name", "").strip()
-        first = row.get("first_name", "").strip()
-        if not last:
+
+    for split in splits:
+        player = split.get("player", {})
+        stat = split.get("stat", {})
+        full_name = player.get("fullName", "").strip()
+        if not full_name:
             continue
-        full = f"{first} {last}".strip() if first else last
+
+        bf = _safe_float(stat.get("battersFaced"), 0.0)
+        if bf < 1:
+            continue
+
+        ip = _parse_ip(stat.get("inningsPitched", "0"))
+        if ip < 5:
+            continue
+
+        era = _safe_float(stat.get("era"), 4.50)
+        hr  = _safe_float(stat.get("homeRuns"), 0.0)
+        bb  = _safe_float(stat.get("baseOnBalls"), 0.0)
+        hbp = _safe_float(stat.get("hitByPitch"), 0.0)
+        k   = _safe_float(stat.get("strikeOuts"), 0.0)
+
+        if ip >= 5:
+            fip = (13 * hr + 3 * (bb + hbp) - 2 * k) / ip + 3.10
+            fip = max(1.0, min(9.0, fip))
+        else:
+            fip = 4.50
+
         entry = {
-            "xera":  _safe_float(row.get("xera"),  4.50),
-            "xfip":  _safe_float(row.get("xfip"),  4.50),
-            "siera": _safe_float(row.get("siera"), 4.50),
-            "era":   _safe_float(row.get("era"),   4.50),
+            "xera":  round(era, 2),
+            "xfip":  round(fip, 2),
+            "siera": round(era, 2),
+            "era":   round(era, 2),
         }
-        result[full] = entry
-        # Also index by "Last" alone for fuzzy matching in layer
-        if last:
+        result[full_name] = entry
+        last = full_name.split()[-1]
+        if last not in result:
             result[last] = entry
 
     if result:
         _PITCHER_CACHE = result
         _PITCHER_CACHE_TS = now
-        logger.info("xstats_collector: loaded %d pitcher xstat rows", len(rows))
+        logger.info("xstats_collector: loaded %d pitcher xstat entries", len(splits))
     else:
         logger.warning("xstats_collector: no pitcher rows fetched; returning stale or empty cache")
 
@@ -120,38 +171,39 @@ def get_team_xwoba() -> dict[str, dict]:
     """
     Returns dict keyed by team abbreviation.
     Each value: {xwoba, woba}
-    Aggregates batter rows by team.
+    xwoba = team avg OPS * 0.38 (rough wOBA conversion proxy).
     """
     global _BATTER_CACHE, _BATTER_CACHE_TS
     now = time.time()
     if _BATTER_CACHE and (now - _BATTER_CACHE_TS) < _TTL:
         return _BATTER_CACHE
 
-    rows = _fetch_csv(_BATTER_URL)
+    splits = _fetch_batter_splits()
 
-    # Accumulate per team: sum xwoba and woba, count rows
     team_accum: dict[str, dict] = {}
-    for row in rows:
-        team = row.get("team_name_abbrev", row.get("team", "")).strip().upper()
+    for split in splits:
+        team = split.get("team", {}).get("abbreviation", "").strip().upper()
+        stat = split.get("stat", {})
         if not team:
             continue
-        xwoba = _safe_float(row.get("xwoba"), 0.0)
-        woba  = _safe_float(row.get("woba"),  0.0)
-        if xwoba == 0.0 and woba == 0.0:
+        ops = _safe_float(stat.get("ops"), 0.0)
+        obp = _safe_float(stat.get("obp"), 0.0)
+        if ops == 0.0 and obp == 0.0:
             continue
         if team not in team_accum:
-            team_accum[team] = {"xwoba_sum": 0.0, "woba_sum": 0.0, "count": 0}
-        team_accum[team]["xwoba_sum"] += xwoba
-        team_accum[team]["woba_sum"]  += woba
-        team_accum[team]["count"]     += 1
+            team_accum[team] = {"ops_sum": 0.0, "obp_sum": 0.0, "count": 0}
+        team_accum[team]["ops_sum"] += ops
+        team_accum[team]["obp_sum"] += obp
+        team_accum[team]["count"]   += 1
 
     result: dict[str, dict] = {}
     for team, acc in team_accum.items():
         n = max(1, acc["count"])
-        result[team] = {
-            "xwoba": round(acc["xwoba_sum"] / n, 3),
-            "woba":  round(acc["woba_sum"]  / n, 3),
-        }
+        avg_ops = acc["ops_sum"] / n
+        avg_obp = acc["obp_sum"] / n
+        xwoba = round(avg_ops * 0.38, 3)
+        woba  = round(avg_obp, 3)
+        result[team] = {"xwoba": xwoba, "woba": woba}
 
     if result:
         _BATTER_CACHE = result
@@ -165,8 +217,8 @@ def get_team_xwoba() -> dict[str, dict]:
 
 def get_pitcher_csw() -> dict[str, float]:
     """
-    CSW% proxy from Baseball Savant pitch arsenal stats.
-    Uses whiff_percent column as called-strike+whiff rate proxy.
+    CSW% proxy from MLB Stats API.
+    Uses strikePercentage / 100 as CSW proxy.
     Returns dict keyed by pitcher name → CSW rate (0.0–1.0 float).
     Cached 6-hour TTL.
     """
@@ -175,30 +227,39 @@ def get_pitcher_csw() -> dict[str, float]:
     if _CSW_CACHE and (now - _CSW_CACHE_TS) < _TTL:
         return _CSW_CACHE
 
-    rows = _fetch_csv(_ARSENAL_URL)
-
+    splits = _fetch_pitcher_splits()
     result: dict[str, float] = {}
-    for row in rows:
-        last  = row.get("last_name", "").strip()
-        first = row.get("first_name", "").strip()
-        if not last:
-            continue
-        full = f"{first} {last}".strip() if first else last
 
-        # whiff_percent in Savant is already a percentage (e.g. 28.5)
-        raw = row.get("whiff_percent") or row.get("whiff_pct") or ""
-        val = _safe_float(raw, default=-1.0)
-        if val < 0:
+    for split in splits:
+        player = split.get("player", {})
+        stat   = split.get("stat", {})
+        full_name = player.get("fullName", "").strip()
+        if not full_name:
             continue
-        csw_rate = val / 100.0 if val > 1.0 else val
-        result[full] = csw_rate
+
+        ip = _parse_ip(stat.get("inningsPitched", "0"))
+        if ip < 5:
+            continue
+
+        bf = _safe_float(stat.get("battersFaced"), 0.0)
+        if bf < 1:
+            continue
+
+        strike_pct_raw = _safe_float(stat.get("strikePercentage"), -1.0)
+        if strike_pct_raw < 0:
+            continue
+
+        # strikePercentage may be stored as 0–100 or 0.0–1.0
+        csw_rate = strike_pct_raw / 100.0 if strike_pct_raw > 1.0 else strike_pct_raw
+        result[full_name] = round(csw_rate, 4)
+        last = full_name.split()[-1]
         if last not in result:
-            result[last] = csw_rate
+            result[last] = round(csw_rate, 4)
 
     if result:
         _CSW_CACHE = result
         _CSW_CACHE_TS = now
-        logger.info("get_pitcher_csw: loaded CSW proxy for %d pitchers", len(rows))
+        logger.info("get_pitcher_csw: loaded CSW proxy for %d pitchers", len(splits))
     else:
         logger.warning("get_pitcher_csw: no rows parsed; returning stale or empty cache")
 
@@ -207,8 +268,9 @@ def get_pitcher_csw() -> dict[str, float]:
 
 def get_stuff_plus() -> dict[str, float]:
     """
-    Stuff+ proxy from Baseball Savant pitch arsenal stats.
-    Uses xwoba_against (inverted) as stuff quality proxy; 100 = league average.
+    Stuff+ proxy from MLB Stats API.
+    Normalize K%-BB% to 100=avg, 10 points per standard deviation above avg.
+    Returns dict keyed by pitcher name → float (100 = average).
     Cached 6-hour TTL.
     """
     global _STUFF_CACHE, _STUFF_CACHE_TS
@@ -216,36 +278,52 @@ def get_stuff_plus() -> dict[str, float]:
     if _STUFF_CACHE and (now - _STUFF_CACHE_TS) < _TTL:
         return _STUFF_CACHE
 
-    rows = _fetch_csv(_ARSENAL_URL)
+    splits = _fetch_pitcher_splits()
 
-    # Collect xwoba_against values to compute league average for normalisation
+    # First pass: collect K%-BB% values
     raw_vals: list[tuple[str, str, float]] = []
-    for row in rows:
-        last  = row.get("last_name", "").strip()
-        first = row.get("first_name", "").strip()
-        if not last:
+    for split in splits:
+        player = split.get("player", {})
+        stat   = split.get("stat", {})
+        full_name = player.get("fullName", "").strip()
+        if not full_name:
             continue
-        full = f"{first} {last}".strip() if first else last
-        xwoba = _safe_float(row.get("xwoba_against") or row.get("xwoba") or "", default=-1.0)
-        if xwoba >= 0:
-            raw_vals.append((full, last, xwoba))
+
+        ip = _parse_ip(stat.get("inningsPitched", "0"))
+        if ip < 5:
+            continue
+
+        bf  = _safe_float(stat.get("battersFaced"), 0.0)
+        if bf < 1:
+            continue
+
+        k   = _safe_float(stat.get("strikeOuts"), 0.0)
+        bb  = _safe_float(stat.get("baseOnBalls"), 0.0)
+        k_pct  = k  / bf if bf > 0 else 0.0
+        bb_pct = bb / bf if bf > 0 else 0.0
+        k_minus_bb = k_pct - bb_pct
+        last = full_name.split()[-1]
+        raw_vals.append((full_name, last, k_minus_bb))
 
     result: dict[str, float] = {}
     if raw_vals:
-        avg_xwoba = sum(v for _, _, v in raw_vals) / len(raw_vals)
-        avg_xwoba = avg_xwoba if avg_xwoba > 0 else 0.320
-        for full, last, xwoba in raw_vals:
-            # Lower xwoba_against → better stuff → above 100
-            stuff = 100.0 * (avg_xwoba / xwoba) if xwoba > 0 else 100.0
-            stuff = round(stuff, 1)
-            result[full] = stuff
+        values = [v for _, _, v in raw_vals]
+        avg_val = sum(values) / len(values)
+        # Compute std deviation
+        variance = sum((v - avg_val) ** 2 for v in values) / max(1, len(values))
+        std_val = math.sqrt(variance) if variance > 0 else 0.05
+
+        for full_name, last, k_minus_bb in raw_vals:
+            z = (k_minus_bb - avg_val) / std_val if std_val > 0 else 0.0
+            stuff = round(100.0 + z * 10.0, 1)
+            result[full_name] = stuff
             if last not in result:
                 result[last] = stuff
 
     if result:
         _STUFF_CACHE = result
         _STUFF_CACHE_TS = now
-        logger.info("get_stuff_plus: loaded Stuff+ proxy for %d pitchers", len(rows))
+        logger.info("get_stuff_plus: loaded Stuff+ proxy for %d pitchers", len(splits))
     else:
         logger.warning("get_stuff_plus: no rows parsed; returning stale or empty cache")
 

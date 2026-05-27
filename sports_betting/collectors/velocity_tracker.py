@@ -1,15 +1,15 @@
 """
-Velocity & spin drop tracker — fetches per-pitcher fastball velocity from Baseball Savant.
+Velocity & spin drop tracker.
+MLB Stats API has no pitch velocity data, so this module returns zero-filled
+entries keyed by pitcher name. Layer 14 handles velocity_season == 0 gracefully
+with a "data unavailable" note.
 Cached module-level with ~6-hour TTL.
 """
 from __future__ import annotations
-import csv
-import io
 import logging
 import time
 
 import requests
-from .savant_headers import SAVANT_HEADERS
 
 logger = logging.getLogger(__name__)
 
@@ -17,16 +17,15 @@ _CACHE: dict = {}
 _CACHE_TS: float = 0.0
 _TTL: float = 6 * 3600
 
-# Four-seam fastball arsenal stats (has season avg and recent velo columns)
 _URL = (
-    "https://baseballsavant.mlb.com/leaderboard/pitch-arsenal-stats"
-    "?type=pitcher&pitchType=FF&year=2026&team=&min=10&csv=true"
+    "https://statsapi.mlb.com/api/v1/stats"
+    "?stats=season&group=pitching&gameType=R&season=2026"
+    "&playerPool=ALL&limit=500&sportId=1"
 )
+_HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-_HEADERS = SAVANT_HEADERS
 
-
-def _safe_float(val: str | None, default: float = 0.0) -> float:
+def _safe_float(val, default: float = 0.0) -> float:
     try:
         return float(val) if val not in (None, "", "null") else default
     except (ValueError, TypeError):
@@ -35,16 +34,9 @@ def _safe_float(val: str | None, default: float = 0.0) -> float:
 
 def get_velocity_data() -> dict[str, dict]:
     """
-    Returns dict keyed by player full name (and last name for fuzzy match).
-    Each value:
-      {
-        season_velo: float,   # season avg fastball velocity
-        recent_velo: float,   # last-7d or recent avg fastball velocity (same as season if no split)
-        velo_drop:   float,   # season_velo - recent_velo  (positive = decline)
-        season_spin: float,   # season avg spin rate
-        recent_spin: float,   # recent spin rate
-        spin_drop_pct: float, # (season_spin - recent_spin) / season_spin  (positive = decline)
-      }
+    Returns dict keyed by pitcher full name and last name.
+    All velocity/spin fields are 0.0 (unavailable from MLB Stats API).
+    Layer 14 handles velocity_season == 0 with a neutral "unavailable" note.
     """
     global _CACHE, _CACHE_TS
     now = time.time()
@@ -52,61 +44,42 @@ def get_velocity_data() -> dict[str, dict]:
         return _CACHE
 
     try:
-        resp = requests.get(_URL, headers=_HEADERS, timeout=12)
-        if resp.status_code == 403:
-            logger.warning("velocity_tracker: Baseball Savant returned 403")
-            return _CACHE  # return stale
+        resp = requests.get(_URL, headers=_HEADERS, timeout=15)
         resp.raise_for_status()
-        text = resp.content.decode("utf-8-sig", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
-        rows = list(csv.DictReader(io.StringIO(text)))
+        splits = resp.json()["stats"][0]["splits"]
     except Exception as exc:
         logger.warning("velocity_tracker: fetch failed: %s", exc)
         return _CACHE
 
     result: dict[str, dict] = {}
-    for row in rows:
-        last  = row.get("last_name", "").strip()
-        first = row.get("first_name", "").strip()
-        if not last:
+    _ZERO = {
+        "season_velo":   0.0,
+        "recent_velo":   0.0,
+        "velo_drop":     0.0,
+        "season_spin":   0.0,
+        "recent_spin":   0.0,
+        "spin_drop_pct": 0.0,
+    }
+
+    for sp in splits:
+        full = sp.get("player", {}).get("fullName", "").strip()
+        if not full:
             continue
-        full = f"{first} {last}".strip() if first else last
-
-        # Savant column names for arsenal stats
-        # Typical columns: avg_speed (season), avg_spin (season)
-        # There may not be a direct last-7d split in the CSV — if absent we leave velo_drop=0
-        season_velo = _safe_float(row.get("avg_speed") or row.get("release_speed"), 0.0)
-        # Some exports have "avg_speed_7d" or similar; try a few names
-        recent_velo = _safe_float(
-            row.get("avg_speed_7d") or row.get("release_speed_recent") or row.get("avg_speed"),
-            season_velo,
-        )
-        season_spin = _safe_float(row.get("avg_spin") or row.get("release_spin_rate"), 0.0)
-        recent_spin = _safe_float(
-            row.get("avg_spin_7d") or row.get("release_spin_rate_recent") or row.get("avg_spin"),
-            season_spin,
-        )
-
-        velo_drop = round(season_velo - recent_velo, 2)
-        spin_drop_pct = 0.0
-        if season_spin > 0:
-            spin_drop_pct = round((season_spin - recent_spin) / season_spin, 4)
-
-        entry = {
-            "season_velo":    season_velo,
-            "recent_velo":    recent_velo,
-            "velo_drop":      velo_drop,
-            "season_spin":    season_spin,
-            "recent_spin":    recent_spin,
-            "spin_drop_pct":  spin_drop_pct,
-        }
-        result[full] = entry
-        if last:
-            result[last] = entry
+        ip = _safe_float(sp.get("stat", {}).get("inningsPitched"), 0)
+        if ip < 5:
+            continue
+        result[full] = _ZERO
+        last = full.split()[-1]
+        if last not in result:
+            result[last] = _ZERO
 
     if result:
         _CACHE = result
         _CACHE_TS = now
-        logger.info("velocity_tracker: loaded %d pitcher velocity rows", len(rows))
+        logger.info(
+            "velocity_tracker: loaded %d pitcher entries (velocity unavailable — MLB Stats API; zeros set)",
+            len(result),
+        )
     else:
         logger.warning("velocity_tracker: no rows loaded; returning stale or empty cache")
 

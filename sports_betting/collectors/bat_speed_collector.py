@@ -1,161 +1,110 @@
 """
-Bat Speed / Exit Velocity Trends Collector — Tier 3, Layer 25.
-Fetches bat tracking leaderboard and sprint speed from Baseball Savant.
+Bat Speed / Sprint Speed Collector — Tier 3, Layer 25.
+MLB Stats API has no bat-tracking or sprint speed data. Uses team slugging%
+as a bat-speed proxy and stolen-base rate as a sprint-speed proxy.
 Aggregates to team level.
 """
 from __future__ import annotations
-import io
 import logging
+import time
 
 import requests
 
 logger = logging.getLogger(__name__)
 
-_BAT_TRACKING_URL = (
-    "https://baseballsavant.mlb.com/leaderboard/bat-tracking"
-    "?attackZone=&batSide=&contactType=&count=&dating=2026&gameType="
-    "&isHardHit=&minSwings=100&minGroupSwings=1&pitchType=&playerType=batter"
-    "&seasonStart=&statcast=&team=&csv=true"
+_CACHE: dict = {}
+_CACHE_TS: float = 0.0
+_TTL: float = 6 * 3600
+
+_BATTER_URL = (
+    "https://statsapi.mlb.com/api/v1/stats"
+    "?stats=season&group=hitting&gameType=R&season=2026"
+    "&playerPool=ALL&limit=1000&sportId=1"
 )
+_HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-_SPRINT_SPEED_URL = (
-    "https://baseballsavant.mlb.com/leaderboard/sprint_speed"
-    "?min_opp=0&position=&team=&year=2026&csv=true"
-)
-
-# Savant uses full team names or abbreviations; normalise to standard abbrevs
-_SAVANT_TEAM_MAP: dict[str, str] = {
-    "Angels": "LAA", "Astros": "HOU", "Athletics": "OAK", "Blue Jays": "TOR",
-    "Braves": "ATL", "Brewers": "MIL", "Cardinals": "STL", "Cubs": "CHC",
-    "Diamondbacks": "ARI", "D-backs": "ARI", "Dodgers": "LAD", "Giants": "SF",
-    "Guardians": "CLE", "Mariners": "SEA", "Marlins": "MIA",
-    "Mets": "NYM", "Nationals": "WSH", "Orioles": "BAL", "Padres": "SD",
-    "Phillies": "PHI", "Pirates": "PIT", "Rangers": "TEX", "Rays": "TB",
-    "Red Sox": "BOS", "Reds": "CIN", "Rockies": "COL", "Royals": "KC",
-    "Tigers": "DET", "Twins": "MIN", "White Sox": "CWS", "Yankees": "NYY",
-}
+# League-average baselines (approximate 2024/2025)
+_LG_SLG   = 0.400   # maps to avg bat speed ~70 mph
+_LG_SB_RATE = 0.12  # SB / (SB+CS), maps to avg sprint ~27.0 ft/sec
 
 
-def _abbrev(team_raw: str) -> str:
-    t = team_raw.strip()
-    if t in _SAVANT_TEAM_MAP:
-        return _SAVANT_TEAM_MAP[t]
-    if len(t) <= 3:
-        return t.upper()
-    for name, abbr in _SAVANT_TEAM_MAP.items():
-        if name.lower() in t.lower() or t.lower() in name.lower():
-            return abbr
-    return t[:3].upper()
-
-
-def _safe_float(val: str, default: float = 0.0) -> float:
+def _safe_float(val, default: float = 0.0) -> float:
     try:
-        return float(str(val).strip().replace(",", ""))
-    except (ValueError, AttributeError):
+        return float(val) if val not in (None, "", "null") else default
+    except (ValueError, TypeError):
         return default
-
-
-def _fetch_savant_csv(url: str) -> list[dict]:
-    try:
-        resp = requests.get(
-            url, timeout=12,
-            headers={"User-Agent": "Mozilla/5.0"},
-        )
-        resp.raise_for_status()
-        import csv
-        reader = csv.DictReader(io.StringIO(resp.text))
-        return [row for row in reader]
-    except Exception as exc:
-        logger.warning("bat_speed_collector: CSV fetch failed (%s): %s", url[:60], exc)
-        return []
 
 
 def get_bat_speed_metrics() -> dict[str, dict]:
     """
-    Fetch bat tracking (bat speed, attack angle) and sprint speed from Baseball Savant.
-    Aggregates to team level.
+    Returns {team_abbrev: {avg_bat_speed, avg_attack_angle, avg_sprint_speed, is_speed_team}}
 
-    Returns:
-        {team_abbrev: {
-            avg_bat_speed: float,       # mph
-            avg_attack_angle: float,    # degrees
-            avg_sprint_speed: float,    # ft/sec
-            is_speed_team: bool,        # avg sprint >= 27.5 ft/sec
-        }}
+    Proxies (MLB Stats API):
+      avg_bat_speed    ≈ 70 + (team_slg - 0.400) * 100   (mph)
+      avg_attack_angle = 10.0 (constant — no proxy available)
+      avg_sprint_speed ≈ 27.0 + (sb_rate - 0.12) * 20    (ft/sec)
+      is_speed_team    = avg_sprint_speed >= 27.5
     """
-    # ── Bat tracking ─────────────────────────────────────────────────
-    bat_rows = _fetch_savant_csv(_BAT_TRACKING_URL)
+    global _CACHE, _CACHE_TS
+    now = time.time()
+    if _CACHE and (now - _CACHE_TS) < _TTL:
+        return _CACHE
 
-    team_bat_speeds: dict[str, list[float]] = {}
-    team_attack_angles: dict[str, list[float]] = {}
+    try:
+        resp = requests.get(_BATTER_URL, headers=_HEADERS, timeout=15)
+        resp.raise_for_status()
+        splits = resp.json()["stats"][0]["splits"]
+    except Exception as exc:
+        logger.warning("bat_speed_collector: fetch failed: %s", exc)
+        return _CACHE
 
-    for row in bat_rows:
-        # Column names vary; try common variants
-        team_raw = row.get("team_name", row.get("team", row.get("Team", "")))
-        if not team_raw:
+    # Accumulate per team
+    team_acc: dict[str, dict] = {}
+    for sp in splits:
+        team = sp.get("team", {}).get("abbreviation", "").strip().upper()
+        if not team:
             continue
-        abbr = _abbrev(team_raw)
-
-        # Bat speed column variants
-        for col in ("bat_speed", "bat_speed_mph", "avg_bat_speed", "Bat Speed"):
-            raw = row.get(col, "")
-            if raw:
-                val = _safe_float(raw)
-                if val > 0:
-                    team_bat_speeds.setdefault(abbr, []).append(val)
-                break
-
-        # Attack angle column variants
-        for col in ("attack_angle", "swing_path_tilt", "Attack Angle"):
-            raw = row.get(col, "")
-            if raw:
-                val = _safe_float(raw)
-                if val != 0.0:
-                    team_attack_angles.setdefault(abbr, []).append(val)
-                break
-
-    # ── Sprint speed ──────────────────────────────────────────────────
-    sprint_rows = _fetch_savant_csv(_SPRINT_SPEED_URL)
-
-    team_sprint_speeds: dict[str, list[float]] = {}
-
-    for row in sprint_rows:
-        team_raw = row.get("team_id", row.get("team", row.get("Team", "")))
-        if not team_raw:
+        stat = sp.get("stat", {})
+        slg = _safe_float(stat.get("slg"), 0.0)
+        sb  = _safe_float(stat.get("stolenBases"), 0.0)
+        cs  = _safe_float(stat.get("caughtStealing"), 0.0)
+        ab  = _safe_float(stat.get("atBats"), 0.0)
+        if slg == 0.0 and sb == 0.0:
             continue
-        abbr = _abbrev(team_raw)
+        if team not in team_acc:
+            team_acc[team] = {"slg_sum": 0.0, "sb": 0.0, "cs": 0.0, "count": 0}
+        team_acc[team]["slg_sum"] += slg
+        team_acc[team]["sb"]      += sb
+        team_acc[team]["cs"]      += cs
+        team_acc[team]["count"]   += 1
 
-        for col in ("sprint_speed", "hp_to_1b", "Sprint Speed", "r_sprint_speed"):
-            raw = row.get(col, "")
-            if raw:
-                val = _safe_float(raw)
-                if val > 0:
-                    team_sprint_speeds.setdefault(abbr, []).append(val)
-                break
-
-    # ── Aggregate ─────────────────────────────────────────────────────
-    all_teams = set(team_bat_speeds) | set(team_sprint_speeds)
     result: dict[str, dict] = {}
+    for team, acc in team_acc.items():
+        n = max(1, acc["count"])
+        avg_slg  = acc["slg_sum"] / n
+        sb_total = acc["sb"] + acc["cs"]
+        sb_rate  = acc["sb"] / sb_total if sb_total > 0 else _LG_SB_RATE
 
-    for abbr in all_teams:
-        bat_vals    = team_bat_speeds.get(abbr, [])
-        angle_vals  = team_attack_angles.get(abbr, [])
-        sprint_vals = team_sprint_speeds.get(abbr, [])
+        # Convert proxies to bat-speed / sprint-speed scale
+        bat_speed    = round(70.0 + (avg_slg - _LG_SLG) * 100.0, 1)
+        sprint_speed = round(27.0 + (sb_rate - _LG_SB_RATE) * 20.0, 2)
 
-        avg_bat_speed    = round(sum(bat_vals) / len(bat_vals), 2)       if bat_vals    else 70.0
-        avg_attack_angle = round(sum(angle_vals) / len(angle_vals), 2)   if angle_vals  else 10.0
-        avg_sprint_speed = round(sum(sprint_vals) / len(sprint_vals), 2) if sprint_vals else 27.0
+        # Clamp to realistic ranges
+        bat_speed    = max(60.0, min(80.0, bat_speed))
+        sprint_speed = max(24.0, min(30.0, sprint_speed))
 
-        result[abbr] = {
-            "avg_bat_speed":    avg_bat_speed,
-            "avg_attack_angle": avg_attack_angle,
-            "avg_sprint_speed": avg_sprint_speed,
-            "is_speed_team":    avg_sprint_speed >= 27.5,
+        result[team] = {
+            "avg_bat_speed":    bat_speed,
+            "avg_attack_angle": 10.0,       # no proxy available
+            "avg_sprint_speed": sprint_speed,
+            "is_speed_team":    sprint_speed >= 27.5,
         }
 
-    if not result:
-        logger.info("bat_speed_collector: no data returned (Savant unavailable)")
+    if result:
+        _CACHE = result
+        _CACHE_TS = now
+        logger.info("bat_speed_collector: loaded %d teams (SLG/SB proxy, MLB Stats API)", len(result))
     else:
-        logger.info("bat_speed_collector: fetched %d teams", len(result))
+        logger.warning("bat_speed_collector: no data returned")
 
-    return result
+    return _CACHE
