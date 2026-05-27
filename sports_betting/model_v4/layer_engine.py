@@ -108,6 +108,17 @@ class TeamProfile:
     defensive_run_value: float = 0.0    # Estimated runs saved: team_oaa * 0.82
     travel_tz_change: float = 0.0       # Time-zone hours traveled (positive = westward)
     travel_fatigue: bool = False         # True if 3+ tz westward travel
+    # Tier 3 fields — luck, platoon, lineup, bat speed
+    babip: float = 0.295                 # Team batting average on balls in play
+    lob_pct: float = 0.720               # Pitcher LOB% (strand rate)
+    luck_score: float = 0.0              # -4 to +4; positive = luck-inflated, negative = luck-deflated
+    wrc_vs_lhp: float = 100.0            # Team avg wRC+ vs left-handed pitchers
+    wrc_vs_rhp: float = 100.0            # Team avg wRC+ vs right-handed pitchers
+    lineup_confirmed: bool = False       # True if day-of lineup is confirmed
+    lineup_value_score: float = 5.0      # 0-10 lineup completeness/value score
+    avg_bat_speed: float = 70.0          # Team avg bat speed in mph
+    avg_sprint_speed: float = 27.0       # Team avg sprint speed in ft/sec
+    is_speed_team: bool = False          # True if avg sprint speed >= 27.5 ft/sec
 
 
 @dataclass
@@ -1403,6 +1414,358 @@ def layer_21_pitch_mix(pick: PickCandidate) -> LayerOutput:
     return out
 
 
+# Turf stadiums (artificial surface) — used by layer_25 for speed-team advantage
+_TURF_STADIUMS: frozenset[str] = frozenset({
+    "Toronto Blue Jays", "Blue Jays", "TOR",
+    "Tampa Bay Rays", "Rays", "TB",
+    "Kansas City Royals", "Royals", "KC",
+    "Arizona Diamondbacks", "Diamondbacks", "ARI",
+    "Seattle Mariners", "Mariners", "SEA",
+    "Miami Marlins", "Marlins", "MIA",
+    "Houston Astros", "Astros", "HOU",
+    "Milwaukee Brewers", "Brewers", "MIL",
+    "Minnesota Twins", "Twins", "MIN",
+})
+
+# Known LHP starters — a curated list to enable layer_23 platoon detection.
+# Maintained as a rough heuristic; real handedness is injected via pitcher profile
+# where available (e.g., from FanGraphs/Statcast data).
+_KNOWN_LHP: frozenset[str] = frozenset({
+    # Active LHP starters (2026 season)
+    "Clayton Kershaw", "Kershaw",
+    "Cole Hamels", "Hamels",
+    "Blake Snell", "Snell",
+    "Nestor Cortes", "Cortes",
+    "Justin Verlander", "Verlander",  # still L throw arm
+    "Patrick Corbin", "Corbin",
+    "Sean Manaea", "Manaea",
+    "Tyler Anderson", "Anderson",
+    "Drew Smyly", "Smyly",
+    "Chris Sale", "Sale",
+    "Jose Quintana", "Quintana",
+    "Jordan Montgomery", "Montgomery",
+    "Robbie Ray", "Ray",
+    "Ranger Suarez", "Suarez",
+    "Bailey Ober", "Ober",
+    "Yusei Kikuchi", "Kikuchi",
+    "MacKenzie Gore", "Gore",
+    "Matthew Boyd", "Boyd",
+    "Jose Berrios", "Berrios",
+    "Framber Valdez", "Valdez",
+    "Spencer Strider", "Strider",
+    "Logan Gilbert", "Gilbert",
+    "Cristopher Sanchez", "Sanchez",
+    "Kyle Harrison", "Harrison",
+    "Ryan Pepiot", "Pepiot",
+    "DJ Herz", "Herz",
+    "Andrew Abbott", "Abbott",
+    "Eduardo Rodriguez", "Rodriguez",
+    "Hayden Birdsong", "Birdsong",
+})
+
+
+def _is_lhp(pitcher_name: str) -> bool:
+    """Return True if pitcher is a known left-hander, else default to RHP assumption."""
+    if not pitcher_name or pitcher_name in ("TBD", ""):
+        return False
+    for token in _KNOWN_LHP:
+        if token.lower() in pitcher_name.lower():
+            return True
+    return False
+
+
+def layer_22_luck_filter(pick: PickCandidate) -> LayerOutput:
+    """
+    Tier 3 — Layer 22: Hot/Cold Streak Luck Filtering.
+    Cross-references team BABIP and pitcher LOB% to identify whether a hot/cold
+    streak is genuine or luck-inflated.  Adjusts confidence notes accordingly.
+    Uses babip, lob_pct, and luck_score fields on TeamProfile.
+    """
+    out = LayerOutput(22, "Luck Filtering (BABIP / LOB%)", passed=True)
+
+    backing_tp  = pick.backing_team_profile
+    opposing_tp = (
+        pick.away_team_profile if pick.backing_team == pick.home_team
+        else pick.home_team_profile
+    )
+
+    notes:   list[str] = []
+    factors: list[str] = []
+
+    b_luck = backing_tp.luck_score
+    o_luck = opposing_tp.luck_score
+    momentum = backing_tp.momentum
+
+    # ── Backing team luck signals ─────────────────────────────────────
+    if b_luck >= 3:
+        label = "hot_streak_luck_inflated"
+        factors.append(label)
+        notes.append(
+            f"WARN: {backing_tp.name} luck score +{b_luck:.0f} "
+            f"(BABIP {backing_tp.babip:.3f} / LOB% {backing_tp.lob_pct:.1%}) — "
+            "hot streak may be luck-driven; expect regression."
+        )
+        out.data["backing_luck_inflated"] = True
+
+    elif b_luck <= -3:
+        label = "luck_correction_due"
+        factors.append(label)
+        notes.append(
+            f"POSITIVE: {backing_tp.name} luck score {b_luck:.0f} — "
+            f"team has been unlucky (BABIP {backing_tp.babip:.3f} / LOB% {backing_tp.lob_pct:.1%}); "
+            "positive regression expected."
+        )
+        out.data["backing_luck_deflated"] = True
+
+    # ── Backing team streaking but lucky ─────────────────────────────
+    if momentum >= 5 and b_luck >= 2:
+        # Downgrade confidence by appending a caution note (no hard-tier change)
+        notes.append(
+            f"CAUTION: {backing_tp.name} is on {momentum}-game win streak "
+            f"but luck score {b_luck:+.0f} — streaking but lucky; downgrade confidence."
+        )
+        out.data["streaking_but_lucky"] = True
+        # Do NOT add as a positive factor — it's a cautionary signal
+        if "hot_streak_luck_inflated" not in factors:
+            factors.append("streaking_but_lucky")
+
+    # ── Opposing team luck signals ────────────────────────────────────
+    if o_luck >= 3:
+        label = "opp_luck_inflated"
+        factors.append(label)
+        notes.append(
+            f"POSITIVE: {opposing_tp.name} luck score +{o_luck:.0f} — "
+            "opponent's recent strong form is luck-inflated; regression favors us."
+        )
+        out.data["opp_luck_inflated"] = True
+
+    out.notes.extend(notes)
+    out.data["luck_factors"] = factors
+    pick.factors.extend(factors)
+
+    if not notes:
+        out.notes.append(
+            f"Layer 22: Luck scores — {backing_tp.name} {b_luck:+.0f} / "
+            f"{opposing_tp.name} {o_luck:+.0f} (no significant luck signals)."
+        )
+    return out
+
+
+def layer_23_platoon(pick: PickCandidate) -> LayerOutput:
+    """
+    Tier 3 — Layer 23: Platoon Splits.
+    Compares backing team wRC+ vs the opposing starter's handedness.
+    Uses wrc_vs_lhp and wrc_vs_rhp on TeamProfile; infers pitcher hand from _KNOWN_LHP.
+    """
+    out = LayerOutput(23, "Platoon Splits", passed=True)
+
+    backing_tp  = pick.backing_team_profile
+    opposing_sp = pick.opposing_pitcher
+
+    notes:   list[str] = []
+    factors: list[str] = []
+
+    pitcher_is_lhp = _is_lhp(opposing_sp.name)
+    hand_label = "LHP" if pitcher_is_lhp else "RHP"
+
+    wrc = backing_tp.wrc_vs_lhp if pitcher_is_lhp else backing_tp.wrc_vs_rhp
+
+    out.data["opp_pitcher_hand"] = hand_label
+    out.data["backing_wrc_vs_hand"] = wrc
+
+    # ── Strong advantage ──────────────────────────────────────────────
+    if wrc >= 120:
+        label = "platoon_advantage"
+        factors.append(label)
+        note = (
+            f"STRONG POSITIVE: {backing_tp.name} wRC+ {wrc:.0f} vs {hand_label} "
+            f"(≥ 120) — significant platoon advantage vs {opposing_sp.name}."
+        )
+        # Amplify if pitcher also has low K rate
+        if opposing_sp.k9 < 7.5:
+            note += (
+                f" AMPLIFIED: {opposing_sp.name} K/9 {opposing_sp.k9:.1f} < 7.5 — "
+                "low strikeout rate makes platoon edge even more potent."
+            )
+            out.data["platoon_low_k_amplified"] = True
+        notes.append(note)
+        out.data["strong_platoon_advantage"] = True
+
+    elif wrc >= 115:
+        label = "platoon_advantage"
+        factors.append(label)
+        notes.append(
+            f"POSITIVE: {backing_tp.name} wRC+ {wrc:.0f} vs {hand_label} "
+            f"(≥ 115) — platoon advantage vs {opposing_sp.name}."
+        )
+        out.data["platoon_advantage"] = True
+
+    elif wrc <= 85:
+        label = "platoon_disadvantage"
+        factors.append(label)
+        notes.append(
+            f"NEGATIVE: {backing_tp.name} wRC+ {wrc:.0f} vs {hand_label} "
+            f"(≤ 85) — platoon disadvantage vs {opposing_sp.name}; "
+            "offense may struggle against this arm side."
+        )
+        out.data["platoon_disadvantage"] = True
+
+    else:
+        notes.append(
+            f"Layer 23: {backing_tp.name} wRC+ {wrc:.0f} vs {hand_label} "
+            f"({opposing_sp.name}) — neutral platoon matchup."
+        )
+
+    out.notes.extend(notes)
+    out.data["platoon_factors"] = factors
+    pick.factors.extend(factors)
+    return out
+
+
+def layer_24_lineup(pick: PickCandidate) -> LayerOutput:
+    """
+    Tier 3 — Layer 24: Day-Of Lineup Scratch Monitor.
+    Evaluates lineup completeness and flags uncertainty or value signals.
+    Informational only — does not hard-fail picks; adjusts confidence notes.
+    Uses lineup_confirmed and lineup_value_score on TeamProfile.
+    """
+    out = LayerOutput(24, "Lineup Completeness Monitor", passed=True)
+
+    backing_tp  = pick.backing_team_profile
+    opposing_tp = (
+        pick.away_team_profile if pick.backing_team == pick.home_team
+        else pick.home_team_profile
+    )
+
+    notes:   list[str] = []
+    factors: list[str] = []
+
+    b_score = backing_tp.lineup_value_score
+    o_score = opposing_tp.lineup_value_score
+    b_confirmed = backing_tp.lineup_confirmed
+    o_confirmed = opposing_tp.lineup_confirmed
+
+    # ── Backing team lineup signals ───────────────────────────────────
+    if b_score <= 3:
+        notes.append(
+            f"WARN: {backing_tp.name} lineup value score {b_score:.0f}/10 — "
+            "significant lineup uncertainty; consider waiting for confirmation."
+        )
+        out.data["backing_lineup_uncertain"] = True
+        factors.append("lineup_uncertainty")
+
+    elif b_confirmed and b_score >= 8:
+        label = "full_lineup_confirmed"
+        factors.append(label)
+        notes.append(
+            f"POSITIVE: {backing_tp.name} full lineup confirmed "
+            f"(value score {b_score:.0f}/10) — no late scratches detected."
+        )
+        out.data["full_lineup_confirmed"] = True
+
+    # ── Opposing team lineup signals ──────────────────────────────────
+    if o_score <= 3:
+        label = "opp_lineup_weakened"
+        factors.append(label)
+        notes.append(
+            f"POSITIVE: {opposing_tp.name} lineup value score {o_score:.0f}/10 — "
+            "opposing key bats may be missing; favorable for backing team."
+        )
+        out.data["opp_lineup_weakened"] = True
+
+    out.notes.extend(notes)
+    out.data["lineup_factors"] = factors
+    pick.factors.extend(factors)
+
+    if not notes:
+        out.notes.append(
+            f"Layer 24: Lineup — {backing_tp.name} {b_score:.0f}/10 "
+            f"({'confirmed' if b_confirmed else 'unconfirmed'}), "
+            f"{opposing_tp.name} {o_score:.0f}/10 — no significant lineup signals."
+        )
+    return out
+
+
+def layer_25_bat_speed(pick: PickCandidate) -> LayerOutput:
+    """
+    Tier 3 — Layer 25: Bat Speed / Exit Velocity Trends.
+    Evaluates team average bat speed and sprint speed.
+    Speed-team + turf stadium = BABIP boost.  High bat speed = elevated offense.
+    Uses avg_bat_speed, avg_sprint_speed, and is_speed_team on TeamProfile.
+    """
+    out = LayerOutput(25, "Bat Speed & Sprint Speed", passed=True)
+
+    backing_tp  = pick.backing_team_profile
+    opposing_sp = pick.opposing_pitcher
+
+    notes:   list[str] = []
+    factors: list[str] = []
+
+    bat_speed    = backing_tp.avg_bat_speed
+    sprint_speed = backing_tp.avg_sprint_speed
+    is_speed     = backing_tp.is_speed_team
+
+    # ── Is this game on a turf surface? ──────────────────────────────
+    on_turf = pick.home_team in _TURF_STADIUMS or pick.home_team[:3].upper() in _TURF_STADIUMS
+
+    # ── Bat speed signals ─────────────────────────────────────────────
+    if bat_speed >= 72.0:
+        label = "elite_bat_speed"
+        factors.append(label)
+        notes.append(
+            f"POSITIVE: {backing_tp.name} avg bat speed {bat_speed:.1f} mph ≥ 72 — "
+            "elite bat speed; elevated offensive ceiling expected."
+        )
+        out.data["elite_bat_speed"] = True
+
+    elif bat_speed <= 68.5:
+        notes.append(
+            f"MILD NEGATIVE: {backing_tp.name} avg bat speed {bat_speed:.1f} mph ≤ 68.5 — "
+            "below-average bat speed; moderate offensive downgrade."
+        )
+        out.data["below_avg_bat_speed"] = True
+
+    # ── Speed team on turf ────────────────────────────────────────────
+    if is_speed and on_turf:
+        label = "speed_turf_advantage"
+        factors.append(label)
+        notes.append(
+            f"POSITIVE: {backing_tp.name} is a speed team "
+            f"(avg sprint {sprint_speed:.1f} ft/sec) playing on turf — "
+            "BABIP boost expected on ground balls through the infield."
+        )
+        out.data["speed_turf_advantage"] = True
+
+        # Amplify signal if opposing pitcher is a high GB% pitcher
+        if opposing_sp.gb_pct >= 0.50:
+            notes.append(
+                f"AMPLIFIED: {opposing_sp.name} ground ball% {opposing_sp.gb_pct:.0%} ≥ 50% — "
+                "heavy GB pitcher against speed team on turf is a premium BABIP amplifier."
+            )
+            out.data["speed_turf_gb_amplified"] = True
+            # Add a stronger factor label if not already present
+            if "speed_turf_advantage" in factors:
+                factors.append("speed_turf_gb_pitcher")
+
+    elif is_speed and not on_turf:
+        notes.append(
+            f"NOTE: {backing_tp.name} is a speed team "
+            f"(avg sprint {sprint_speed:.1f} ft/sec) but playing on grass — "
+            "speed advantage less pronounced."
+        )
+
+    out.notes.extend(notes)
+    out.data["bat_speed_factors"] = factors
+    pick.factors.extend(factors)
+
+    if not notes:
+        out.notes.append(
+            f"Layer 25: {backing_tp.name} bat speed {bat_speed:.1f} mph / "
+            f"sprint {sprint_speed:.1f} ft/sec — no significant bat speed signals."
+        )
+    return out
+
+
 def _extract_keywords_for_weight(factor_str: str) -> list[str]:
     """Map a factor string to weight lookup keys (mirrors weight_trainer._extract_factor_keywords)."""
     kws = []
@@ -1465,11 +1828,12 @@ def run_all_layers(
     line_moved_toward_backing: bool | None = None,
 ) -> PickCandidate:
     """
-    Execute all 21 layers in sequence for one pick candidate.
+    Execute all 25 layers in sequence for one pick candidate.
     Returns the pick with tier, market, factors, and all layer outputs attached.
     Layers 1-12: core analysis pipeline.
     Layers 13-16: Tier 1 enrichment (xStats, velocity, catcher framing, umpire).
     Layers 17-21: Tier 2 enrichment (CSW/Stuff+, air density, travel, defense, pitch mix).
+    Layers 22-25: Tier 3 enrichment (luck filter, platoon splits, lineup monitor, bat speed).
     """
     layers_fn = [
         lambda: layer_1_identity(pick),
@@ -1494,6 +1858,11 @@ def run_all_layers(
         lambda: layer_19_travel(pick),
         lambda: layer_20_defense(pick),
         lambda: layer_21_pitch_mix(pick),
+        # Tier 3 enrichment layers — informational, additive factors only
+        lambda: layer_22_luck_filter(pick),
+        lambda: layer_23_platoon(pick),
+        lambda: layer_24_lineup(pick),
+        lambda: layer_25_bat_speed(pick),
     ]
 
     for fn in layers_fn:

@@ -55,6 +55,10 @@ from ..collectors.air_density_collector import get_air_density_for_game
 from ..collectors.travel_fatigue_collector import get_travel_fatigue
 from ..collectors.defensive_metrics_collector import get_team_oaa
 from ..collectors.pitch_mix_collector import get_pitch_mix_changes
+from ..collectors.luck_metrics_collector import get_luck_metrics
+from ..collectors.platoon_splits_collector import get_platoon_splits
+from ..collectors.lineup_monitor import get_lineups
+from ..collectors.bat_speed_collector import get_bat_speed_metrics
 from ..signals.aggregator import run_all_signals, build_signal_factors
 
 logger = logging.getLogger(__name__)
@@ -159,6 +163,13 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
     t2_travel_data   = get_travel_fatigue(date_str)
     t2_defense_data  = get_team_oaa()
     t2_pitch_mix_data = get_pitch_mix_changes()
+
+    # Tier 3 enrichment data (fetched once, reused per game)
+    logger.info("Fetching Tier 3 enrichment data (luck, platoon splits, lineups, bat speed)...")
+    t3_luck_data     = get_luck_metrics()
+    t3_platoon_data  = get_platoon_splits()
+    t3_lineup_data   = get_lineups(date_str)
+    t3_bat_speed_data = get_bat_speed_metrics()
 
     # ------------------------------------------------------------------ #
     # LAYERS 1-12 — Full analysis per game                               #
@@ -348,6 +359,15 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
             t2_travel_data=t2_travel_data,
             t2_defense_data=t2_defense_data,
             t2_pitch_mix_data=t2_pitch_mix_data,
+        )
+
+        # ── Tier 3: inject enrichment data into pick/profiles ────────
+        _inject_tier3_data(
+            pick=pick,
+            t3_luck_data=t3_luck_data,
+            t3_platoon_data=t3_platoon_data,
+            t3_lineup_data=t3_lineup_data,
+            t3_bat_speed_data=t3_bat_speed_data,
         )
 
         pick = run_all_layers(
@@ -858,3 +878,60 @@ def _inject_tier2_data(
             pitcher.pitch_mix_details = mix_entry.get("details",     "")
             # Store change_type as a custom attr for layer_21 to read
             pitcher._pitch_mix_change_type = mix_entry.get("change_type", None)  # type: ignore[attr-defined]
+
+
+# ------------------------------------------------------------------ #
+#  Tier 3 enrichment injection                                        #
+# ------------------------------------------------------------------ #
+
+def _inject_tier3_data(
+    pick,
+    t3_luck_data: dict,
+    t3_platoon_data: dict,
+    t3_lineup_data: dict,
+    t3_bat_speed_data: dict,
+) -> None:
+    """
+    Mutates TeamProfile fields on the pick with Tier 3 enrichment data
+    fetched before the per-game loop.
+
+    Follows the exact same pattern as _inject_tier1_data and _inject_tier2_data:
+    try 3-letter abbreviation first; only overwrite when real data is present.
+    """
+    # ── 1. Luck metrics (BABIP, LOB%, luck_score) into TeamProfile ────
+    for team_profile in (pick.home_team_profile, pick.away_team_profile):
+        team_abbr = team_profile.name[:3].upper()
+        luck_entry = t3_luck_data.get(team_abbr, {})
+        if luck_entry:
+            team_profile.babip      = luck_entry.get("babip",      team_profile.babip)
+            team_profile.lob_pct    = luck_entry.get("lob_pct",    team_profile.lob_pct)
+            team_profile.luck_score = luck_entry.get("luck_score",  team_profile.luck_score)
+
+    # ── 2. Platoon splits (wRC+ vs LHP / RHP) into TeamProfile ───────
+    for team_profile in (pick.home_team_profile, pick.away_team_profile):
+        team_abbr = team_profile.name[:3].upper()
+        platoon_entry = t3_platoon_data.get(team_abbr, {})
+        if platoon_entry:
+            team_profile.wrc_vs_lhp = platoon_entry.get("wrc_vs_lhp", team_profile.wrc_vs_lhp)
+            team_profile.wrc_vs_rhp = platoon_entry.get("wrc_vs_rhp", team_profile.wrc_vs_rhp)
+
+    # ── 3. Day-of lineup data into TeamProfile ────────────────────────
+    for team_profile in (pick.home_team_profile, pick.away_team_profile):
+        # Try 3-letter abbreviation (RotoWire / MLB API use these)
+        team_abbr = team_profile.name[:3].upper()
+        lineup_entry = t3_lineup_data.get(team_abbr, {})
+        if not lineup_entry:
+            # Fallback: full team name (some sources return full names)
+            lineup_entry = t3_lineup_data.get(team_profile.name, {})
+        if lineup_entry:
+            team_profile.lineup_confirmed   = lineup_entry.get("lineup_confirmed",    team_profile.lineup_confirmed)
+            team_profile.lineup_value_score = lineup_entry.get("value_score",          team_profile.lineup_value_score)
+
+    # ── 4. Bat speed & sprint speed into TeamProfile ──────────────────
+    for team_profile in (pick.home_team_profile, pick.away_team_profile):
+        team_abbr = team_profile.name[:3].upper()
+        bat_entry = t3_bat_speed_data.get(team_abbr, {})
+        if bat_entry:
+            team_profile.avg_bat_speed    = bat_entry.get("avg_bat_speed",    team_profile.avg_bat_speed)
+            team_profile.avg_sprint_speed = bat_entry.get("avg_sprint_speed", team_profile.avg_sprint_speed)
+            team_profile.is_speed_team    = bat_entry.get("is_speed_team",    team_profile.is_speed_team)

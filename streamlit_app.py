@@ -839,6 +839,59 @@ def render_intelligence_tab(all_signals: dict, xwoba_luck: dict, games: list, sh
                 f"_{sp.get('notes','')}_"
             )
 
+    # ── Tier 3 signals legend ─────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### 🔬 Tier 3 Signal Guide")
+    st.caption(
+        "Layers 22-25 add advanced context signals. "
+        "Each appears in a pick's factor list when triggered."
+    )
+
+    tier3_signals = [
+        ("hot_streak_luck_inflated",   "orange",
+         "**Layer 22 — Luck Filter:** Backing team's hot streak may be BABIP/LOB%-driven; expect regression."),
+        ("luck_correction_due",        "green",
+         "**Layer 22 — Luck Filter:** Team has been unlucky (low BABIP/LOB%); positive regression expected."),
+        ("streaking_but_lucky",        "orange",
+         "**Layer 22 — Luck Filter:** Team is on a win streak but luck score is elevated — downgrade confidence."),
+        ("opp_luck_inflated",          "green",
+         "**Layer 22 — Luck Filter:** Opponent's form is luck-inflated; regression favors backing side."),
+        ("platoon_advantage",          "green",
+         "**Layer 23 — Platoon Splits:** Backing team wRC+ ≥ 115 vs opposing starter's handedness."),
+        ("platoon_disadvantage",       "red",
+         "**Layer 23 — Platoon Splits:** Backing team wRC+ ≤ 85 vs opposing starter's handedness — offense may struggle."),
+        ("lineup_uncertainty",         "orange",
+         "**Layer 24 — Lineup Monitor:** Backing team lineup value score ≤ 3/10; significant uncertainty."),
+        ("full_lineup_confirmed",      "green",
+         "**Layer 24 — Lineup Monitor:** Full lineup confirmed, no late scratches detected."),
+        ("opp_lineup_weakened",        "green",
+         "**Layer 24 — Lineup Monitor:** Opposing team key bats may be missing (value score ≤ 3/10)."),
+        ("elite_bat_speed",            "green",
+         "**Layer 25 — Bat Speed:** Backing team avg bat speed ≥ 72 mph — elevated offensive ceiling."),
+        ("speed_turf_advantage",       "green",
+         "**Layer 25 — Bat Speed:** Speed team (sprint ≥ 27.5 ft/s) on turf — BABIP boost expected."),
+        ("speed_turf_gb_pitcher",      "green",
+         "**Layer 25 — Bat Speed:** Speed/turf advantage amplified by opposing pitcher's high ground-ball rate."),
+        # Tier 1 & 2 signals also documented here for completeness
+        ("elite_csw",                  "green",
+         "**Layer 17 — CSW/Stuff+:** Backing pitcher CSW% ≥ 30% — elite called-strike+whiff rate."),
+        ("velo_drop",                  "red",
+         "**Layer 14 — Velocity:** Opposing pitcher fastball velocity significantly down — arm fatigue signal."),
+        ("tight_zone_umpire",          "green",
+         "**Layer 16 — Umpire:** Umpire calls UNDER ≥ 58% — tight zone favors pitching picks."),
+        ("opp_travel_fatigue",         "green",
+         "**Layer 19 — Travel:** Opponent traveled 3+ time zones westward — significant fatigue disadvantage."),
+        ("elite_defense",              "green",
+         "**Layer 20 — Defense:** Backing team OAA ≥ +15 — elite defense suppresses ERA below FIP."),
+    ]
+
+    col_a, col_b = st.columns(2)
+    for i, (signal_key, color, description) in enumerate(tier3_signals):
+        col = col_a if i % 2 == 0 else col_b
+        with col:
+            st.markdown(f":{color}[●] `{signal_key}`")
+            st.caption(description)
+
 
 def _build_hr_parlays_direct(hr_results: dict) -> list[dict]:
     """
