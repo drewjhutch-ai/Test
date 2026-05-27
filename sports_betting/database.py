@@ -96,6 +96,15 @@ def _norm(val):
     return val
 
 
+def _pg_params(params):
+    """Normalize params for PostgreSQL: cast Python booleans to int (SQLite stores as 0/1)."""
+    if params is None:
+        return None
+    if isinstance(params, dict):
+        return {k: (int(v) if isinstance(v, bool) else v) for k, v in params.items()}
+    return tuple(int(v) if isinstance(v, bool) else v for v in params)
+
+
 def _norm_row(row) -> dict:
     return {k: _norm(v) for k, v in dict(row).items()}
 
@@ -130,14 +139,14 @@ class _PGConn:
 
     def execute(self, sql: str, params=None) -> _PGCursor:
         cur = self._cur()
-        cur.execute(_to_pg(sql), params)
+        cur.execute(_to_pg(sql), _pg_params(params))
         return _PGCursor(cur)
 
     def executemany(self, sql: str, params_list):
         cur = self._cur()
         pg = _to_pg(sql)
         for p in params_list:
-            cur.execute(pg, p)
+            cur.execute(pg, _pg_params(p))
         return self
 
     def executescript(self, script: str):
