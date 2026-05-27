@@ -170,7 +170,7 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
         _f_pitch    = _pool.submit(get_pitch_mix_changes)
         _f_luck     = _pool.submit(get_luck_metrics)
         _f_platoon  = _pool.submit(get_platoon_splits)
-        _f_lineup   = _pool.submit(get_lineups, date_str)
+        _f_lineup   = _pool.submit(_timed, get_lineups, date_str, timeout=15, default={})
         _f_bat      = _pool.submit(get_bat_speed_metrics)
 
         fg_stats           = _f_fg.result()

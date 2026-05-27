@@ -5,6 +5,7 @@ steam moves, and reverse line movement to identify sharp action.
 """
 import logging
 import requests
+from datetime import datetime, timezone, timedelta
 from bs4 import BeautifulSoup
 from ..config import SHARP_TICKET_PCT_THRESHOLD, SHARP_MONEY_PCT_THRESHOLD
 from ..database import get_db, save_sharp_play
@@ -86,14 +87,15 @@ def analyze_steam_move(game_id: str, book: str, market: str, threshold_minutes: 
     Steam move: multiple books move the same direction in rapid succession.
     This is one of the strongest sharp money indicators.
     """
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=threshold_minutes)).isoformat()
     with get_db() as conn:
         recent_moves = conn.execute("""
             SELECT book, side, old_price, new_price, movement_time
             FROM line_movements
             WHERE game_id=? AND market=?
-            AND movement_time >= datetime('now', ? || ' minutes')
+            AND movement_time >= ?
             ORDER BY movement_time DESC
-        """, (game_id, market, f"-{threshold_minutes}")).fetchall()
+        """, (game_id, market, cutoff)).fetchall()
 
     if len(recent_moves) < 2:
         return False

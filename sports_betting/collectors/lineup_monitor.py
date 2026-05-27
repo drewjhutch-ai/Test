@@ -99,7 +99,7 @@ def _fetch_rotowire(date_str: str) -> dict[str, dict]:
     try:
         resp = requests.get(
             _ROTOWIRE_URL,
-            timeout=12,
+            timeout=8,
             headers={"User-Agent": "Mozilla/5.0"},
         )
         resp.raise_for_status()
@@ -145,7 +145,7 @@ def _fetch_mlb_api(date_str: str) -> dict[str, dict]:
     result: dict[str, dict] = {}
     try:
         url = _MLB_SCHEDULE_URL.format(date=date_str)
-        resp = requests.get(url, timeout=12)
+        resp = requests.get(url, timeout=8)
         resp.raise_for_status()
         data = resp.json()
 
