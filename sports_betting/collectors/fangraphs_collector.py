@@ -48,129 +48,180 @@ def _save_cache(name: str, data: dict):
                 pass
 
 
+_MLB_PITCHER_URL = (
+    "https://statsapi.mlb.com/api/v1/stats"
+    "?stats=season&group=pitching&gameType=R&season=2026"
+    "&playerPool=ALL&limit=500&sportId=1"
+)
+_MLB_HEADERS = {"User-Agent": "Mozilla/5.0"}
+
+_FG_MLB_CACHE: dict = {}
+_FG_MLB_CACHE_TS: float = 0.0
+_FG_MLB_TTL: float = 6 * 3600
+
+
+def _parse_ip(ip_str) -> float:
+    try:
+        s = str(ip_str)
+        if "." in s:
+            whole, frac = s.split(".", 1)
+            return float(whole) + int(frac) / 3.0
+        return float(s)
+    except (ValueError, TypeError):
+        return 0.0
+
+
 def get_pitcher_stats_fangraphs(season: int = None) -> dict[str, dict]:
     """
-    Pull pitcher stats from Baseball Reference (via pybaseball).
-    FanGraphs is blocked; BRef provides ERA, FIP, WHIP, K/9, BB/9.
-    xFIP and SIERA are approximated from FIP (highly correlated, r>0.95).
+    Pitcher stats from MLB Stats API (ERA, FIP, WHIP, K/9, BB/9).
+    FanGraphs and BRef are blocked on cloud IPs; MLB Stats API is free
+    and unrestricted. FIP computed from components; xFIP = FIP proxy.
     """
-    cached = _load_cache("fangraphs_pitching")
-    if cached:
-        logger.info("Pitching stats loaded from cache (%d pitchers)", len(cached))
-        return cached
-
-    if season is None:
-        season = datetime.now().year
+    import time as _time
+    global _FG_MLB_CACHE, _FG_MLB_CACHE_TS
+    now = _time.time()
+    if _FG_MLB_CACHE and (now - _FG_MLB_CACHE_TS) < _FG_MLB_TTL:
+        return _FG_MLB_CACHE
 
     try:
-        from pybaseball import pitching_stats_bref
-        logger.info("Fetching BRef pitching stats for %d...", season)
-        df = pitching_stats_bref(season)
+        resp = requests.get(_MLB_PITCHER_URL, headers=_MLB_HEADERS, timeout=15)
+        resp.raise_for_status()
+        splits = resp.json()["stats"][0]["splits"]
+    except Exception as exc:
+        logger.warning("get_pitcher_stats_fangraphs (MLB API): fetch failed: %s", exc)
+        return _FG_MLB_CACHE
 
-        stats = {}
-        for _, row in df.iterrows():
-            name = str(row.get("Name", "")).strip()
-            if not name:
-                continue
+    stats: dict[str, dict] = {}
+    for split in splits:
+        player = split.get("player", {})
+        stat   = split.get("stat", {})
+        name   = player.get("fullName", "").strip()
+        if not name:
+            continue
 
-            ip  = _safe_float(row.get("IP")) or 0
-            so  = _safe_float(row.get("SO")) or 0
-            bb  = _safe_float(row.get("BB")) or 0
-            fip = _safe_float(row.get("FIP"))
+        ip  = _parse_ip(stat.get("inningsPitched", "0"))
+        if ip < 5:
+            continue
 
-            k9  = round(so / ip * 9, 2) if ip > 0 else None
-            bb9 = round(bb / ip * 9, 2) if ip > 0 else None
-            kbb = round(so / bb, 2) if bb > 0 else None
+        so  = float(stat.get("strikeOuts") or 0)
+        bb  = float(stat.get("baseOnBalls") or 0)
+        hbp = float(stat.get("hitByPitch") or 0)
+        hr  = float(stat.get("homeRuns") or 0)
+        gs  = int(stat.get("gamesStarted") or 0)
 
-            entry = {
-                "name":  name,
-                "team":  str(row.get("Tm", "")),
-                "era":   _safe_float(row.get("ERA")),
-                "fip":   fip,
-                "xfip":  fip,   # FIP is a close proxy for xFIP (r>0.95)
-                "siera": fip,   # SIERA highly correlated; use FIP as estimate
-                "whip":  _safe_float(row.get("WHIP")),
-                "k9":    k9,
-                "bb9":   bb9,
-                "kbb":   kbb,
-                "swstr": None,
-                "ip":    ip,
-                "gs":    int(row.get("GS", 0) or 0),
-            }
+        try:
+            era = float(stat.get("era") or 4.50)
+        except (ValueError, TypeError):
+            era = 4.50
+        try:
+            whip = float(stat.get("whip") or 1.30)
+        except (ValueError, TypeError):
+            whip = 1.30
 
-            last = name.split()[-1].lower()
-            full_lower = name.lower().replace(" ", "_")
-            stats[full_lower] = entry
-            if last not in stats:
-                stats[last] = entry
+        fip = max(1.0, min(9.0, (13 * hr + 3 * (bb + hbp) - 2 * so) / ip + 3.10)) if ip > 0 else 4.50
+        k9  = round(so / ip * 9, 2) if ip > 0 else None
+        bb9 = round(bb / ip * 9, 2) if ip > 0 else None
+        kbb = round(so / bb, 2) if bb > 0 else None
 
-        _save_cache("fangraphs_pitching", stats)
-        logger.info("BRef pitching stats: loaded %d pitchers", len(stats))
-        return stats
+        entry = {
+            "name":  name,
+            "era":   round(era, 2),
+            "fip":   round(fip, 2),
+            "xfip":  round(fip, 2),
+            "siera": round(era, 2),
+            "whip":  round(whip, 3),
+            "k9":    k9,
+            "bb9":   bb9,
+            "kbb":   kbb,
+            "swstr": None,
+            "ip":    round(ip, 1),
+            "gs":    gs,
+        }
+        last       = name.split()[-1].lower()
+        full_lower = name.lower().replace(" ", "_")
+        stats[full_lower] = entry
+        if last not in stats:
+            stats[last] = entry
 
-    except ImportError:
-        logger.warning("pybaseball not installed.")
-        return {}
-    except Exception as e:
-        logger.error("FanGraphs fetch failed: %s", e)
-        return {}
+    if stats:
+        _FG_MLB_CACHE    = stats
+        _FG_MLB_CACHE_TS = now
+        logger.info("get_pitcher_stats_fangraphs (MLB API): loaded %d pitchers", len(stats))
+    else:
+        logger.warning("get_pitcher_stats_fangraphs (MLB API): no rows returned")
+
+    return _FG_MLB_CACHE
+
+
+_SC_MLB_CACHE: dict = {}
+_SC_MLB_CACHE_TS: float = 0.0
 
 
 def get_statcast_pitcher_metrics(season: int = None) -> dict[str, dict]:
     """
-    Pull Statcast metrics from Baseball Savant via pybaseball.
-    Provides barrel rate, hard hit %, exit velocity, spin rate.
-    Cached daily.
+    Statcast-style pitcher metrics from MLB Stats API.
+    Baseball Savant is blocked on cloud; MLB API provides K%, BB%, HR/9
+    as proxies for barrel rate / hard-hit %. Cached 6 hours.
     """
-    cached = _load_cache("statcast_pitchers")
-    if cached:
-        logger.info("Statcast pitcher metrics loaded from cache (%d pitchers)", len(cached))
-        return cached
-
-    if season is None:
-        season = datetime.now().year
+    import time as _time
+    global _SC_MLB_CACHE, _SC_MLB_CACHE_TS
+    now = _time.time()
+    if _SC_MLB_CACHE and (now - _SC_MLB_CACHE_TS) < _FG_MLB_TTL:
+        return _SC_MLB_CACHE
 
     try:
-        from pybaseball import statcast_pitcher_exitvelo_barrels
-        logger.info("Fetching Statcast pitcher metrics for %d...", season)
+        resp = requests.get(_MLB_PITCHER_URL, headers=_MLB_HEADERS, timeout=15)
+        resp.raise_for_status()
+        splits = resp.json()["stats"][0]["splits"]
+    except Exception as exc:
+        logger.warning("get_statcast_pitcher_metrics (MLB API): fetch failed: %s", exc)
+        return _SC_MLB_CACHE
 
-        df = statcast_pitcher_exitvelo_barrels(season)
+    stats: dict[str, dict] = {}
+    for split in splits:
+        player = split.get("player", {})
+        stat   = split.get("stat", {})
+        name   = player.get("fullName", "").strip()
+        if not name:
+            continue
 
-        stats = {}
-        for _, row in df.iterrows():
-            name = str(row.get("last_name, first_name", "")).strip()
-            # Savant format is "Last, First" — flip it
-            if "," in name:
-                parts = name.split(",")
-                name = f"{parts[1].strip()} {parts[0].strip()}"
+        ip  = _parse_ip(stat.get("inningsPitched", "0"))
+        if ip < 5:
+            continue
 
-            if not name:
-                continue
+        bf  = float(stat.get("battersFaced") or 1)
+        so  = float(stat.get("strikeOuts") or 0)
+        bb  = float(stat.get("baseOnBalls") or 0)
+        hr  = float(stat.get("homeRuns") or 0)
 
-            entry = {
-                "name": name,
-                "barrel_rate":     _safe_float(row.get("barrel_batted_rate")),
-                "hard_hit_pct":    _safe_float(row.get("hard_hit_percent")),
-                "avg_exit_velo":   _safe_float(row.get("avg_hit_speed")),
-                "avg_launch_angle":_safe_float(row.get("avg_hit_angle")),
-                "xba":             _safe_float(row.get("xba")),
-                "xslg":            _safe_float(row.get("xslg")),
-                "xwoba":           _safe_float(row.get("xwoba")),
-            }
+        k_pct  = so / bf if bf > 0 else 0.20
+        hr9    = (hr / ip * 9) if ip > 0 else 1.2
+        # Proxy: barrel_rate ≈ 2×HR/9 capped at 15%, hard_hit ≈ 35 + k_pct×30
+        barrel_rate   = round(min(15.0, hr9 * 2.0), 1)
+        hard_hit_pct  = round(min(55.0, max(25.0, 35.0 + k_pct * 30.0)), 1)
+        avg_exit_velo = round(max(83.0, min(92.0, 88.0 - k_pct * 5.0)), 1)
 
-            full_lower = name.lower().replace(" ", "_")
-            last = name.split()[-1].lower()
-            stats[full_lower] = entry
-            if last not in stats:
-                stats[last] = entry
+        entry = {
+            "name":          name,
+            "barrel_rate":   barrel_rate,
+            "hard_hit_pct":  hard_hit_pct,
+            "hard_hit_rate": hard_hit_pct / 100.0,
+            "avg_exit_velo": avg_exit_velo,
+        }
+        last       = name.split()[-1].lower()
+        full_lower = name.lower().replace(" ", "_")
+        stats[full_lower] = entry
+        if last not in stats:
+            stats[last] = entry
 
-        _save_cache("statcast_pitchers", stats)
-        logger.info("Statcast: loaded metrics for %d pitchers", len(df))
-        return stats
+    if stats:
+        _SC_MLB_CACHE    = stats
+        _SC_MLB_CACHE_TS = now
+        logger.info("get_statcast_pitcher_metrics (MLB API): loaded %d pitchers", len(stats))
+    else:
+        logger.warning("get_statcast_pitcher_metrics (MLB API): no rows returned")
 
-    except Exception as e:
-        logger.warning("Statcast pitcher metrics fetch failed: %s", e)
-        return {}
+    return _SC_MLB_CACHE
 
 
 def get_statcast_batter_metrics(season: int = None) -> dict[str, dict]:
