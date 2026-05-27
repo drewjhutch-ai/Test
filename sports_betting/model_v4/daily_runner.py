@@ -197,6 +197,38 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
     all_signals = run_all_signals(games, standings_by_name, team_id_map)
     logger.info("All enrichment data loaded.")
 
+    # Pre-fetch team streaks and weather in parallel (avoids 30+ sequential MLB API calls)
+    all_team_ids: set[tuple] = {
+        (game["home_team"], team_id_map.get(game["home_team"]))
+        for game in games
+    } | {
+        (game["away_team"], team_id_map.get(game["away_team"]))
+        for game in games
+    }
+    streaks_cache: dict[str, dict] = {}
+    weather_cache: dict[str, dict] = {}
+
+    def _fetch_streak(name: str, team_id: int | None) -> tuple[str, dict]:
+        if team_id:
+            return name, compute_team_streak(team_id, name)
+        return name, {}
+
+    def _fetch_weather(home: str, game_id: str) -> tuple[str, dict]:
+        return game_id, get_game_weather(home, game_id)
+
+    with ThreadPoolExecutor(max_workers=20) as _prep_pool:
+        _sf = {_prep_pool.submit(_fetch_streak, n, tid): n for n, tid in all_team_ids if n}
+        _wf = {
+            _prep_pool.submit(_fetch_weather, g["home_team"], g["game_id"]): g["game_id"]
+            for g in games
+        }
+        for fut in _sf:
+            name, streak = fut.result()
+            streaks_cache[name] = streak
+        for fut in _wf:
+            gid, w = fut.result()
+            weather_cache[gid] = w
+
     # ------------------------------------------------------------------ #
     # LAYERS 1-12 — Full analysis per game                               #
     # ------------------------------------------------------------------ #
@@ -218,8 +250,8 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
         away = game["away_team"]
         game_id = game["game_id"]
 
-        # Weather
-        weather_raw = get_game_weather(home, game_id)
+        # Weather (pre-fetched)
+        weather_raw = weather_cache.get(game_id, {})
         weather = WeatherProfile(
             temperature=weather_raw.get("temperature", 72),
             wind_speed=weather_raw.get("wind_speed", 5),
@@ -241,11 +273,8 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
         # Build team profiles
         home_stand = standings_by_name.get(home, {})
         away_stand = standings_by_name.get(away, {})
-        home_team_id = team_id_map.get(home)
-        away_team_id = team_id_map.get(away)
-
-        home_streak_raw = compute_team_streak(home_team_id, home) if home_team_id else {}
-        away_streak_raw = compute_team_streak(away_team_id, away) if away_team_id else {}
+        home_streak_raw = streaks_cache.get(home, {})
+        away_streak_raw = streaks_cache.get(away, {})
 
         home_profile = _build_team_profile(home, home_stand, home_streak_raw)
         away_profile = _build_team_profile(away, away_stand, away_streak_raw)

@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
@@ -35,10 +36,10 @@ _PITCHER_URL = (
     "?stats=season&group=pitching&gameType=R&season=2026"
     "&playerPool=ALL&limit=500&sportId=1"
 )
-_BATTER_URL = (
-    "https://statsapi.mlb.com/api/v1/stats"
+_TEAMS_URL = "https://statsapi.mlb.com/api/v1/teams?sportId=1&season=2026"
+_TEAM_HITTING_URL = (
+    "https://statsapi.mlb.com/api/v1/teams/{team_id}/stats"
     "?stats=season&group=hitting&gameType=R&season=2026"
-    "&playerPool=ALL&limit=1000&sportId=1"
 )
 
 _HEADERS = {"User-Agent": "Mozilla/5.0"}
@@ -82,18 +83,6 @@ def _fetch_pitcher_splits() -> list:
     except Exception as exc:
         logger.warning("xstats_collector: pitcher splits fetch failed: %s", exc)
         return _SPLITS_CACHE
-
-
-def _fetch_batter_splits() -> list:
-    """Fetch batter season splits from MLB Stats API."""
-    try:
-        resp = requests.get(_BATTER_URL, headers=_HEADERS, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        return data["stats"][0]["splits"]
-    except Exception as exc:
-        logger.warning("xstats_collector: batter splits fetch failed: %s", exc)
-        return []
 
 
 # ------------------------------------------------------------------ #
@@ -167,43 +156,53 @@ def get_pitcher_xstats() -> dict[str, dict]:
     return _PITCHER_CACHE
 
 
+def _fetch_team_xwoba(team_id: int, abbrev: str) -> tuple[str, dict] | None:
+    try:
+        url = _TEAM_HITTING_URL.format(team_id=team_id)
+        resp = requests.get(url, headers=_HEADERS, timeout=5)
+        resp.raise_for_status()
+        splits = resp.json().get("stats", [{}])[0].get("splits", [])
+        if not splits:
+            return None
+        stat = splits[0].get("stat", {})
+        ops = _safe_float(stat.get("ops"), 0.0)
+        obp = _safe_float(stat.get("obp"), 0.0)
+        if ops == 0.0 and obp == 0.0:
+            return None
+        return abbrev, {"xwoba": round(ops * 0.38, 3), "woba": round(obp, 3)}
+    except Exception:
+        return None
+
+
 def get_team_xwoba() -> dict[str, dict]:
     """
-    Returns dict keyed by team abbreviation.
-    Each value: {xwoba, woba}
-    xwoba = team avg OPS * 0.38 (rough wOBA conversion proxy).
+    Returns {team_abbrev: {xwoba, woba}}.
+    xwoba = team OPS * 0.38 (rough wOBA proxy). All 30 teams fetched in parallel.
     """
     global _BATTER_CACHE, _BATTER_CACHE_TS
     now = time.time()
     if _BATTER_CACHE and (now - _BATTER_CACHE_TS) < _TTL:
         return _BATTER_CACHE
 
-    splits = _fetch_batter_splits()
-
-    team_accum: dict[str, dict] = {}
-    for split in splits:
-        team = split.get("team", {}).get("abbreviation", "").strip().upper()
-        stat = split.get("stat", {})
-        if not team:
-            continue
-        ops = _safe_float(stat.get("ops"), 0.0)
-        obp = _safe_float(stat.get("obp"), 0.0)
-        if ops == 0.0 and obp == 0.0:
-            continue
-        if team not in team_accum:
-            team_accum[team] = {"ops_sum": 0.0, "obp_sum": 0.0, "count": 0}
-        team_accum[team]["ops_sum"] += ops
-        team_accum[team]["obp_sum"] += obp
-        team_accum[team]["count"]   += 1
+    try:
+        teams_resp = requests.get(_TEAMS_URL, headers=_HEADERS, timeout=10)
+        teams_resp.raise_for_status()
+        teams = [
+            (t.get("id"), t.get("abbreviation", "").strip().upper())
+            for t in teams_resp.json().get("teams", [])
+            if t.get("id") and t.get("abbreviation")
+        ]
+    except Exception as exc:
+        logger.warning("xstats_collector: teams fetch failed: %s", exc)
+        return _BATTER_CACHE
 
     result: dict[str, dict] = {}
-    for team, acc in team_accum.items():
-        n = max(1, acc["count"])
-        avg_ops = acc["ops_sum"] / n
-        avg_obp = acc["obp_sum"] / n
-        xwoba = round(avg_ops * 0.38, 3)
-        woba  = round(avg_obp, 3)
-        result[team] = {"xwoba": xwoba, "woba": woba}
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futures = {pool.submit(_fetch_team_xwoba, tid, abbr): abbr for tid, abbr in teams}
+        for fut in as_completed(futures):
+            val = fut.result()
+            if val:
+                result[val[0]] = val[1]
 
     if result:
         _BATTER_CACHE = result
