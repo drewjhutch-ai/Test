@@ -161,7 +161,7 @@ class _PGConn:
 def get_db():
     if _USE_PG:
         import psycopg2
-        raw = psycopg2.connect(DATABASE_URL)
+        raw = psycopg2.connect(DATABASE_URL, sslmode="require", connect_timeout=10)
         conn = _PGConn(raw)
         try:
             yield conn
