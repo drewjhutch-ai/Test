@@ -43,6 +43,7 @@ else:
 
 _RE_TEXT_TS  = re.compile(r"TEXT\s+DEFAULT\s+\(datetime\('now'\)\)", re.I)
 _RE_INS_IGN  = re.compile(r"INSERT\s+OR\s+IGNORE\s+INTO", re.I)
+_RE_INS_REPL = re.compile(r"INSERT\s+OR\s+REPLACE\s+INTO", re.I)
 _RE_DT_INTV  = re.compile(r"datetime\('now',\s*['\"](-?\d+)\s+(\w+)['\"]\)", re.I)
 _RE_DT_NOW   = re.compile(r"datetime\('now'\)", re.I)
 _RE_DATE_NOW = re.compile(r"date\('now'\)", re.I)
@@ -52,12 +53,15 @@ _RE_NAMED    = re.compile(r":([a-zA-Z_]\w*)")
 
 def _to_pg(sql: str) -> str:
     """Convert SQLite-dialect SQL to PostgreSQL."""
-    had_ignore = bool(_RE_INS_IGN.search(sql))
+    had_ignore  = bool(_RE_INS_IGN.search(sql))
+    had_replace = bool(_RE_INS_REPL.search(sql))
 
     # DDL: TEXT timestamp columns → TIMESTAMPTZ
     sql = _RE_TEXT_TS.sub("TIMESTAMPTZ DEFAULT NOW()", sql)
     # INSERT OR IGNORE → INSERT (ON CONFLICT DO NOTHING appended later)
     sql = _RE_INS_IGN.sub("INSERT INTO", sql)
+    # INSERT OR REPLACE → INSERT (ON CONFLICT DO NOTHING appended later)
+    sql = _RE_INS_REPL.sub("INSERT INTO", sql)
     # datetime('now', '-N unit') → NOW() - INTERVAL 'N unit'
     sql = _RE_DT_INTV.sub(
         lambda m: f"NOW() - INTERVAL '{abs(int(m.group(1)))} {m.group(2)}'", sql
@@ -73,8 +77,8 @@ def _to_pg(sql: str) -> str:
     sql = sql.replace("?", "%s")
     # :name → %(name)s  (named params)
     sql = _RE_NAMED.sub(r"%(\1)s", sql)
-    # Append ON CONFLICT DO NOTHING for INSERT OR IGNORE
-    if had_ignore and "ON CONFLICT" not in sql.upper():
+    # Append ON CONFLICT DO NOTHING for INSERT OR IGNORE / INSERT OR REPLACE
+    if (had_ignore or had_replace) and "ON CONFLICT" not in sql.upper():
         sql = sql.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
 
     return sql
