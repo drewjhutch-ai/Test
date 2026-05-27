@@ -11,6 +11,7 @@ Bridges the v4 model to the existing data collection infrastructure.
 """
 from __future__ import annotations
 import logging
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from datetime import datetime
 
 from ..collectors.mlb_collector import (
@@ -62,6 +63,20 @@ from ..collectors.bat_speed_collector import get_bat_speed_metrics
 from ..signals.aggregator import run_all_signals, build_signal_factors
 
 logger = logging.getLogger(__name__)
+
+
+def _timed(fn, *args, timeout: int = 8, default=None, **kwargs):
+    """Call fn(*args, **kwargs) with a hard wall-clock timeout. Returns default on timeout/error."""
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(fn, *args, **kwargs)
+            return future.result(timeout=timeout)
+    except FuturesTimeout:
+        logger.warning("_timed: %s timed out after %ds — using default", getattr(fn, "__name__", fn), timeout)
+        return default if default is not None else {}
+    except Exception as exc:
+        logger.warning("_timed: %s failed: %s — using default", getattr(fn, "__name__", fn), exc)
+        return default if default is not None else {}
 
 
 def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
@@ -132,44 +147,55 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
     standings = get_team_standings()
     standings_by_name = {s["team_name"]: s for s in standings}
 
-    # Upgrade 1 — FanGraphs live pitcher stats
-    logger.info("Fetching FanGraphs pitcher stats...")
-    fg_stats = get_pitcher_stats_fangraphs()
+    # All enrichment data fetched in parallel — keeps boot time under 60s.
+    # Calls that hit external sites (FanGraphs/Savant/Covers/InsideThePen) use _timed()
+    # so a blocked URL never stalls the whole pipeline.
+    logger.info("Fetching all enrichment data in parallel...")
+    with ThreadPoolExecutor(max_workers=20) as _pool:
+        _f_fg       = _pool.submit(_timed, get_pitcher_stats_fangraphs,   timeout=8,  default={})
+        _f_sc       = _pool.submit(_timed, get_statcast_pitcher_metrics,   timeout=8,  default={})
+        _f_vel_fg   = _pool.submit(_timed, get_pitcher_velocity_trends,    timeout=8,  default={})
+        _f_hr       = _pool.submit(_timed, get_pitcher_hr_vulnerability,   timeout=8,  default={})
+        _f_xwoba_lk = _pool.submit(_timed, get_team_xwoba_luck,           timeout=8,  default={})
+        _f_px       = _pool.submit(get_pitcher_xstats)
+        _f_tx       = _pool.submit(get_team_xwoba)
+        _f_vel      = _pool.submit(get_velocity_data)
+        _f_frm      = _pool.submit(get_framing_by_team)
+        _f_ump      = _pool.submit(_timed, get_todays_umpires, date_str,  timeout=10, default={})
+        _f_bull     = _pool.submit(_timed, get_bullpen_fatigue,           timeout=10, default={})
+        _f_csw      = _pool.submit(get_pitcher_csw)
+        _f_stuff    = _pool.submit(get_stuff_plus)
+        _f_travel   = _pool.submit(get_travel_fatigue, date_str)
+        _f_defense  = _pool.submit(get_team_oaa)
+        _f_pitch    = _pool.submit(get_pitch_mix_changes)
+        _f_luck     = _pool.submit(get_luck_metrics)
+        _f_platoon  = _pool.submit(get_platoon_splits)
+        _f_lineup   = _pool.submit(get_lineups, date_str)
+        _f_bat      = _pool.submit(get_bat_speed_metrics)
 
-    # Upgrade 2 — Baseball Savant Statcast metrics
-    logger.info("Fetching Statcast pitcher metrics...")
-    sc_stats = get_statcast_pitcher_metrics()
+        fg_stats           = _f_fg.result()
+        sc_stats           = _f_sc.result()
+        velocity_data      = _f_vel_fg.result()
+        hr_vuln_data       = _f_hr.result()
+        xwoba_luck         = _f_xwoba_lk.result()
+        t1_pitcher_xstats  = _f_px.result()
+        t1_team_xwoba      = _f_tx.result()
+        t1_velocity        = _f_vel.result()
+        t1_framing_by_team = _f_frm.result()
+        t1_umpires         = _f_ump.result()
+        t1_bullpen_fatigue = _f_bull.result()
+        t2_csw_data        = _f_csw.result()
+        t2_stuff_data      = _f_stuff.result()
+        t2_travel_data     = _f_travel.result()
+        t2_defense_data    = _f_defense.result()
+        t2_pitch_mix_data  = _f_pitch.result()
+        t3_luck_data       = _f_luck.result()
+        t3_platoon_data    = _f_platoon.result()
+        t3_lineup_data     = _f_lineup.result()
+        t3_bat_speed_data  = _f_bat.result()
 
-    # Signal data collection (signals 1-13)
-    logger.info("Collecting intelligence signals...")
-    velocity_data = get_pitcher_velocity_trends()
-    hr_vuln_data  = get_pitcher_hr_vulnerability()
-    xwoba_luck    = get_team_xwoba_luck()
-    all_signals   = run_all_signals(games, standings_by_name, team_id_map)
-
-    # Tier 1 enrichment data (fetched once, reused per game)
-    logger.info("Fetching Tier 1 enrichment data (xStats, velocity, framing, umpires, fatigue)...")
-    t1_pitcher_xstats  = get_pitcher_xstats()
-    t1_team_xwoba      = get_team_xwoba()
-    t1_velocity        = get_velocity_data()
-    t1_framing_by_team = get_framing_by_team()
-    t1_umpires         = get_todays_umpires(date_str)
-    t1_bullpen_fatigue = get_bullpen_fatigue()
-
-    # Tier 2 enrichment data (fetched once, reused per game)
-    logger.info("Fetching Tier 2 enrichment data (CSW, Stuff+, travel, defense, pitch mix)...")
-    t2_csw_data      = get_pitcher_csw()
-    t2_stuff_data    = get_stuff_plus()
-    t2_travel_data   = get_travel_fatigue(date_str)
-    t2_defense_data  = get_team_oaa()
-    t2_pitch_mix_data = get_pitch_mix_changes()
-
-    # Tier 3 enrichment data (fetched once, reused per game)
-    logger.info("Fetching Tier 3 enrichment data (luck, platoon splits, lineups, bat speed)...")
-    t3_luck_data     = get_luck_metrics()
-    t3_platoon_data  = get_platoon_splits()
-    t3_lineup_data   = get_lineups(date_str)
-    t3_bat_speed_data = get_bat_speed_metrics()
+    all_signals = run_all_signals(games, standings_by_name, team_id_map)
+    logger.info("All enrichment data loaded.")
 
     # ------------------------------------------------------------------ #
     # LAYERS 1-12 — Full analysis per game                               #
