@@ -449,43 +449,59 @@ def check_velocity_trend(pitcher_name: str, velocity_data: dict) -> dict:
 
 # ── Signal 13: Pitcher HR/FB rate + Fly Ball % ────────────────────────
 
+_HR_VULN_CACHE: dict = {}
+_HR_VULN_CACHE_TS: float = 0.0
+
+
 def get_pitcher_hr_vulnerability(season: int = None) -> dict[str, dict]:
     """
-    Pull HR/FB rate and FB% for all pitchers.
+    HR vulnerability from MLB Stats API (HR/9, HR/FB proxy).
     HR/FB > 12% + FB% > 40% = homer-prone starter.
+    pybaseball/BRef blocked on cloud; MLB Stats API is free and unrestricted.
     """
-    if season is None:
-        season = date.today().year
-
-    cached = _load_cache("pitcher_hr_vuln")
-    if cached:
-        return cached
+    import time as _time
+    global _HR_VULN_CACHE, _HR_VULN_CACHE_TS
+    now = _time.time()
+    if _HR_VULN_CACHE and (now - _HR_VULN_CACHE_TS) < _FG_MLB_TTL:
+        return _HR_VULN_CACHE
 
     try:
-        from pybaseball import pitching_stats_bref
-        df = pitching_stats_bref(season)
-        result = {}
-        for _, row in df.iterrows():
-            name = str(row.get("Name", "")).strip()
-            if not name:
-                continue
-            hr9 = _safe_float(row.get("HR9")) or _safe_float(row.get("HR/9")) or 1.2
-            ip  = _safe_float(row.get("IP")) or 1
-            hrs = _safe_float(row.get("HR")) or 0
-            # Approximate HR/FB: assume ~35% FB rate, derive HR/FB from HR9
-            # League avg HR/9 ~1.2 maps to ~12% HR/FB
-            hr_fb_approx = round(min(0.30, max(0.05, hr9 / 10.0)), 3)
-            result[name.split()[-1].lower()] = {
-                "name": name,
-                "hr_fb_rate": hr_fb_approx,
-                "fb_pct": 0.35,
-                "hr9": hr9,
-            }
-        _save_cache("pitcher_hr_vuln", result)
-        return result
-    except Exception as e:
-        logger.warning("HR/FB fetch failed: %s", e)
-        return {}
+        resp = requests.get(_MLB_PITCHER_URL, headers=_MLB_HEADERS, timeout=15)
+        resp.raise_for_status()
+        splits = resp.json()["stats"][0]["splits"]
+    except Exception as exc:
+        logger.warning("get_pitcher_hr_vulnerability (MLB API): fetch failed: %s", exc)
+        return _HR_VULN_CACHE
+
+    result: dict[str, dict] = {}
+    for split in splits:
+        player = split.get("player", {})
+        stat   = split.get("stat", {})
+        name   = player.get("fullName", "").strip()
+        if not name:
+            continue
+        ip = _parse_ip(stat.get("inningsPitched", "0"))
+        if ip < 5:
+            continue
+        hr  = float(stat.get("homeRuns") or 0)
+        hr9 = round(hr / ip * 9, 2) if ip > 0 else 1.2
+        # League avg HR/9 ~1.2 → ~12% HR/FB; scale linearly
+        hr_fb = round(min(0.30, max(0.05, hr9 / 10.0)), 3)
+        last  = name.split()[-1].lower()
+        entry = {"name": name, "hr_fb_rate": hr_fb, "fb_pct": 0.35, "hr9": hr9}
+        result[last] = entry
+        full_lower = name.lower().replace(" ", "_")
+        if full_lower not in result:
+            result[full_lower] = entry
+
+    if result:
+        _HR_VULN_CACHE    = result
+        _HR_VULN_CACHE_TS = now
+        logger.info("get_pitcher_hr_vulnerability (MLB API): loaded %d pitchers", len(result))
+    else:
+        logger.warning("get_pitcher_hr_vulnerability (MLB API): no rows returned")
+
+    return _HR_VULN_CACHE
 
 
 # ── Signal 12: Rolling barrel rate (15-day) ──────────────────────────
