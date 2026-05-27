@@ -43,6 +43,11 @@ from ..collectors.fangraphs_collector import (
     get_pitcher_velocity_trends, check_velocity_trend,
     get_pitcher_hr_vulnerability, get_team_xwoba_luck,
 )
+from ..collectors.xstats_collector import get_pitcher_xstats, get_team_xwoba
+from ..collectors.velocity_tracker import get_velocity_data
+from ..collectors.catcher_framing_collector import get_framing_by_team
+from ..collectors.umpire_collector import get_todays_umpires
+from ..collectors.bullpen_fatigue_collector import get_bullpen_fatigue
 from ..signals.aggregator import run_all_signals, build_signal_factors
 
 logger = logging.getLogger(__name__)
@@ -130,6 +135,15 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
     hr_vuln_data  = get_pitcher_hr_vulnerability()
     xwoba_luck    = get_team_xwoba_luck()
     all_signals   = run_all_signals(games, standings_by_name, team_id_map)
+
+    # Tier 1 enrichment data (fetched once, reused per game)
+    logger.info("Fetching Tier 1 enrichment data (xStats, velocity, framing, umpires, fatigue)...")
+    t1_pitcher_xstats  = get_pitcher_xstats()
+    t1_team_xwoba      = get_team_xwoba()
+    t1_velocity        = get_velocity_data()
+    t1_framing_by_team = get_framing_by_team()
+    t1_umpires         = get_todays_umpires(date_str)
+    t1_bullpen_fatigue = get_bullpen_fatigue()
 
     # ------------------------------------------------------------------ #
     # LAYERS 1-12 — Full analysis per game                               #
@@ -297,6 +311,17 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
         # Note TBD games but still analyze with available data
         if home_sp_name in ("TBD", "") or away_sp_name in ("TBD", ""):
             pick.skip_reason = None  # Clear any skip — allow layers to run with warning
+
+        # ── Tier 1: inject enrichment data into pick/profiles ────────
+        _inject_tier1_data(
+            pick=pick,
+            t1_pitcher_xstats=t1_pitcher_xstats,
+            t1_team_xwoba=t1_team_xwoba,
+            t1_velocity=t1_velocity,
+            t1_framing_by_team=t1_framing_by_team,
+            t1_umpires=t1_umpires,
+            t1_bullpen_fatigue=t1_bullpen_fatigue,
+        )
 
         pick = run_all_layers(
             pick=pick,
@@ -643,3 +668,83 @@ def _build_factor_list(
         factors.append(f"Wind {weather.wind_speed:.0f}mph in — suppresses scoring")
 
     return factors
+
+
+# ------------------------------------------------------------------ #
+#  Tier 1 enrichment injection                                        #
+# ------------------------------------------------------------------ #
+
+def _inject_tier1_data(
+    pick,
+    t1_pitcher_xstats: dict,
+    t1_team_xwoba: dict,
+    t1_velocity: dict,
+    t1_framing_by_team: dict,
+    t1_umpires: dict,
+    t1_bullpen_fatigue: dict,
+) -> None:
+    """
+    Mutates PitcherProfile fields and TeamProfile fields on the pick with
+    Tier 1 enrichment data fetched before the per-game loop.
+    Also attaches umpire data as a custom attribute on the pick object.
+    """
+    # ── 1. Pitcher xStats (xERA into PitcherProfile) ─────────────────
+    for pitcher in (pick.home_pitcher, pick.away_pitcher):
+        if pitcher.name in ("TBD", ""):
+            continue
+        # Try full name first, then last name only
+        xdata = t1_pitcher_xstats.get(pitcher.name)
+        if not xdata:
+            last = pitcher.name.split()[-1]
+            xdata = t1_pitcher_xstats.get(last)
+        if xdata:
+            # Only overwrite if we got real data (non-default)
+            if xdata.get("xera", 4.50) != 4.50 or xdata.get("era", 4.50) != 4.50:
+                pitcher.xera  = xdata.get("xera",  pitcher.xera)
+                pitcher.xfip  = xdata.get("xfip",  pitcher.xfip)
+                pitcher.siera = xdata.get("siera", pitcher.siera)
+
+    # ── 2. Team xwOBA gap (stored as custom attr for layer_13) ───────
+    for team_profile in (pick.home_team_profile, pick.away_team_profile):
+        team_abbr = team_profile.name[:3].upper()
+        xwoba_entry = t1_team_xwoba.get(team_abbr, {})
+        xwoba = xwoba_entry.get("xwoba", 0.0)
+        woba  = xwoba_entry.get("woba",  0.0)
+        if xwoba > 0 and woba > 0:
+            gap = round(xwoba - woba, 3)  # positive = hitting below expected (rebound due)
+            team_profile._xwoba_gap = gap  # type: ignore[attr-defined]
+        else:
+            team_profile._xwoba_gap = None  # type: ignore[attr-defined]
+
+    # ── 3. Velocity & spin data into PitcherProfile ───────────────────
+    for pitcher in (pick.home_pitcher, pick.away_pitcher):
+        if pitcher.name in ("TBD", ""):
+            continue
+        vdata = t1_velocity.get(pitcher.name)
+        if not vdata:
+            last = pitcher.name.split()[-1]
+            vdata = t1_velocity.get(last)
+        if vdata:
+            pitcher.velocity_season = vdata.get("season_velo",   pitcher.velocity_season)
+            pitcher.velocity_7d     = vdata.get("recent_velo",   pitcher.velocity_7d)
+            pitcher.spin_rate_season = vdata.get("season_spin",  pitcher.spin_rate_season)
+            pitcher.spin_rate_7d    = vdata.get("recent_spin",   pitcher.spin_rate_7d)
+
+    # ── 4. Catcher framing into TeamProfile ───────────────────────────
+    for team_profile in (pick.home_team_profile, pick.away_team_profile):
+        team_abbr = team_profile.name[:3].upper()
+        framing = t1_framing_by_team.get(team_abbr)
+        if framing is not None:
+            team_profile.framing_runs = framing
+
+    # ── 5. Umpire data attached to pick as custom attr ────────────────
+    ump_data = t1_umpires.get(str(pick.game_id), {})
+    pick._umpire_data = ump_data  # type: ignore[attr-defined]
+
+    # ── 6. Bullpen fatigue into TeamProfile ───────────────────────────
+    for team_profile in (pick.home_team_profile, pick.away_team_profile):
+        team_abbr = team_profile.name[:3].upper()
+        fatigue_entry = t1_bullpen_fatigue.get(team_abbr, {})
+        if fatigue_entry:
+            team_profile.bullpen_fatigue_score  = fatigue_entry.get("fatigue_score",   0.0)
+            team_profile.bullpen_arms_available = fatigue_entry.get("arms_available",  3)

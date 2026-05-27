@@ -72,6 +72,12 @@ class PitcherProfile:
     is_il_return: bool = False
     is_bullpen_game: bool = False
     confirmed_sources: int = 0
+    csw_rate: float = 0.28          # Called Strike + Whiff %
+    stuff_plus: float = 100.0
+    velocity_7d: float = 0.0        # Recent avg fastball velo
+    velocity_season: float = 0.0    # Season avg fastball velo
+    spin_rate_7d: float = 0.0
+    spin_rate_season: float = 0.0
 
 
 @dataclass
@@ -93,6 +99,9 @@ class TeamProfile:
     avg_launch_angle: float = 12.0  # Team avg launch angle
     ops_last_14d: float = 0.720     # Team OPS last 14 days
     k_rate: float = 0.23            # Team strikeout rate (as batters)
+    framing_runs: float = 0.0       # Catcher framing runs above average
+    bullpen_fatigue_score: float = 0.0   # 0-10; 7+ = fatigued
+    bullpen_arms_available: int = 3      # Fresh arms with < 25 pitches last 3 days
 
 
 @dataclass
@@ -268,7 +277,7 @@ def layer_2_cps(pick: PickCandidate) -> LayerOutput:
 
 
 def layer_3_bullpen(pick: PickCandidate) -> LayerOutput:
-    """Evaluate bullpen quality for full-game picks. Skip for F5."""
+    """Evaluate bullpen quality for full-game picks. Skip for F5. Includes fatigue analysis."""
     out = LayerOutput(3, "Bullpen Composite Score (CBS)", passed=True)
 
     if "f5" in pick.proposed_market.lower():
@@ -302,6 +311,35 @@ def layer_3_bullpen(pick: PickCandidate) -> LayerOutput:
         )
     else:
         out.notes.append("Bullpen: neutral (gap < 0.50).")
+
+    # ── Bullpen fatigue upgrade ───────────────────────────────────────
+    backing_tp  = pick.backing_team_profile
+    opposing_tp = (
+        pick.away_team_profile if pick.backing_team == pick.home_team
+        else pick.home_team_profile
+    )
+    is_full_game = "f5" not in pick.proposed_market.lower()
+
+    opp_fatigue  = opposing_tp.bullpen_fatigue_score
+    back_fatigue = backing_tp.bullpen_fatigue_score
+
+    if opp_fatigue >= 7.0:
+        factor_label = "bullpen_fatigued"
+        pick.factors.append(factor_label)
+        out.notes.append(
+            f"POSITIVE: {opposing_tp.name} bullpen fatigue score {opp_fatigue:.1f}/10 — "
+            f"top arms overworked, {opposing_tp.bullpen_arms_available} fresh arms available. "
+            "Opponent cannot cover late innings cleanly."
+        )
+        out.data["opp_bullpen_fatigued"] = True
+
+    if back_fatigue >= 7.0 and is_full_game:
+        out.notes.append(
+            f"WARN: {backing_tp.name} OWN bullpen fatigue score {back_fatigue:.1f}/10 — "
+            f"only {backing_tp.bullpen_arms_available} fresh arms available. "
+            "Full-game pick carries late-inning risk."
+        )
+        out.data["backing_bullpen_fatigued"] = True
 
     return out
 
@@ -796,6 +834,241 @@ def layer_12_limits(card: list[PickCandidate]) -> LayerOutput:
     return out
 
 
+def layer_13_xstats(pick: PickCandidate) -> LayerOutput:
+    """
+    xStats Gap analysis — compare xERA vs ERA for ERA fraud and team xwOBA rebound signals.
+    Uses data pre-loaded into PitcherProfile and TeamProfile fields by daily_runner.
+    """
+    out = LayerOutput(13, "xStats Gap (xERA / xwOBA)", passed=True)
+
+    backing_sp  = pick.backing_pitcher
+    opposing_sp = pick.opposing_pitcher
+    backing_tp  = pick.backing_team_profile
+
+    notes: list[str] = []
+    factors: list[str] = []
+
+    # ── Opposing pitcher ERA fraud via xERA gap ──────────────────────
+    opp_era_gap = opposing_sp.xera - opposing_sp.era  # positive = xERA > ERA = fraud
+    if opp_era_gap >= 0.75:
+        label = f"xERA_fraud_{opposing_sp.name}"
+        factors.append(label)
+        notes.append(
+            f"ERA FRAUD (xStats): {opposing_sp.name} ERA {opposing_sp.era:.2f} "
+            f"vs xERA {opposing_sp.xera:.2f} (gap +{opp_era_gap:.2f}) — "
+            "strong fade signal, ERA will regress up."
+        )
+        out.data["opposing_xera_fraud"] = True
+
+    # ── Backing pitcher outperforming (xERA < ERA) ───────────────────
+    back_era_gap = backing_sp.era - backing_sp.xera  # positive = ERA > xERA = outperforming
+    if back_era_gap >= 0.75:
+        factors.append(f"backing_sp_outperforming_{backing_sp.name}")
+        notes.append(
+            f"POSITIVE: {backing_sp.name} ERA {backing_sp.era:.2f} "
+            f"vs xERA {backing_sp.xera:.2f} — pitcher outperforming metrics, ERA should improve."
+        )
+
+    # ── Team xwOBA rebound (batting side) ────────────────────────────
+    # backing_tp.ops_last_14d used as wOBA proxy when dedicated wOBA field absent
+    # xwoba stored externally; we check if it was injected into pick.layer_outputs data
+    # Convention: daily_runner injects xwoba gap into backing_team_profile via a custom attr
+    # We read it from a known data field if present (set by daily_runner on the profile)
+    xwoba_gap = getattr(backing_tp, "_xwoba_gap", None)
+    if xwoba_gap is not None and xwoba_gap >= 0.020:
+        factors.append(f"team_xwoba_rebound_{backing_tp.name}")
+        notes.append(
+            f"POSITIVE: {backing_tp.name} xwOBA gap +{xwoba_gap:.3f} — "
+            "offense hitting below expected, rebound due."
+        )
+        out.data["xwoba_rebound"] = True
+
+    out.notes.extend(notes)
+    out.data["xstats_factors"] = factors
+    pick.factors.extend(factors)
+    return out
+
+
+def layer_14_velocity(pick: PickCandidate) -> LayerOutput:
+    """
+    Velocity & spin drop analysis on the opposing pitcher.
+    Signals apply to the batting team (if opposing pitcher declining, back the batters).
+    Uses data pre-loaded into PitcherProfile fields by daily_runner.
+    """
+    out = LayerOutput(14, "Velocity / Spin Drop", passed=True)
+
+    opp_sp = pick.opposing_pitcher
+    notes: list[str] = []
+    factors: list[str] = []
+
+    velo_drop = 0.0
+    if opp_sp.velocity_season > 0 and opp_sp.velocity_7d > 0:
+        velo_drop = opp_sp.velocity_season - opp_sp.velocity_7d
+    elif opp_sp.velocity_season > 0 and opp_sp.velocity_7d == 0:
+        # No recent data — can't flag
+        velo_drop = 0.0
+
+    spin_drop_pct = 0.0
+    if opp_sp.spin_rate_season > 0 and opp_sp.spin_rate_7d > 0:
+        spin_drop_pct = (opp_sp.spin_rate_season - opp_sp.spin_rate_7d) / opp_sp.spin_rate_season
+
+    if velo_drop >= 2.5:
+        label = f"velo_drop_{opp_sp.name}"
+        factors.append(label)
+        notes.append(
+            f"STRONG FADE SIGNAL: {opp_sp.name} fastball velo down "
+            f"{velo_drop:.1f} mph (season {opp_sp.velocity_season:.1f} → "
+            f"recent {opp_sp.velocity_7d:.1f}) — significant arm fatigue."
+        )
+        out.data["strong_velo_drop"] = True
+        # Flag potential tier downgrade on opposing pitcher confidence
+        out.data["tier_downgrade_signal"] = True
+    elif velo_drop >= 1.5:
+        label = f"velo_drop_{opp_sp.name}"
+        factors.append(label)
+        notes.append(
+            f"WARN: {opp_sp.name} fastball velo down {velo_drop:.1f} mph — "
+            "mild fatigue indicator, monitor."
+        )
+        out.data["mild_velo_drop"] = True
+
+    if spin_drop_pct >= 0.05:
+        factors.append(f"spin_drop_{opp_sp.name}")
+        notes.append(
+            f"WARN: {opp_sp.name} spin rate down "
+            f"{spin_drop_pct:.1%} — reduced movement/break on breaking balls."
+        )
+        out.data["spin_drop"] = True
+
+    out.notes.extend(notes)
+    out.data["velocity_factors"] = factors
+    pick.factors.extend(factors)
+
+    if not notes:
+        out.notes.append(
+            f"Layer 14: {opp_sp.name} velocity data "
+            + ("unavailable." if opp_sp.velocity_season == 0 else "nominal — no significant drop detected.")
+        )
+    return out
+
+
+def layer_15_catcher_framing(pick: PickCandidate) -> LayerOutput:
+    """
+    Catcher framing impact on K prop bets and totals.
+    Uses framing_runs field on TeamProfile (populated by daily_runner).
+    """
+    out = LayerOutput(15, "Catcher Framing", passed=True)
+
+    backing_tp  = pick.backing_team_profile
+    opposing_tp = (
+        pick.away_team_profile if pick.backing_team == pick.home_team
+        else pick.home_team_profile
+    )
+
+    notes: list[str] = []
+    factors: list[str] = []
+
+    back_framing = backing_tp.framing_runs
+    opp_framing  = opposing_tp.framing_runs
+
+    # Elite backing catcher — expands zone for backing team's K props
+    if back_framing > 8:
+        factors.append(f"elite_framing_{backing_tp.name}")
+        notes.append(
+            f"POSITIVE: {backing_tp.name} catcher framing +{back_framing:.1f} runs above avg — "
+            "elite zone expansion; boosts K prop confidence and pitcher-favorable outcomes."
+        )
+        out.data["elite_framing_backing"] = True
+
+    # Poor opposing catcher — pitcher's effective zone shrinks
+    if opp_framing < -8:
+        factors.append(f"poor_framing_opp_{opposing_tp.name}")
+        notes.append(
+            f"WARN: {opposing_tp.name} catcher framing {opp_framing:.1f} runs below avg — "
+            "zone shrinks for backing team's pitcher; increased bullpen risk, caution on K totals."
+        )
+        out.data["poor_framing_opposing"] = True
+
+    # Mild signals
+    if 4 < back_framing <= 8:
+        notes.append(
+            f"MILD POSITIVE: {backing_tp.name} catcher framing +{back_framing:.1f} — above average zone management."
+        )
+    if -8 <= opp_framing < -4:
+        notes.append(
+            f"MILD WARN: {opposing_tp.name} catcher framing {opp_framing:.1f} — slightly below average."
+        )
+
+    out.notes.extend(notes)
+    out.data["framing_factors"] = factors
+    pick.factors.extend(factors)
+
+    if not notes:
+        out.notes.append("Layer 15: Catcher framing data unavailable or neutral.")
+    return out
+
+
+def layer_16_umpire(pick: PickCandidate) -> LayerOutput:
+    """
+    Umpire tendency analysis for totals and pitcher-favorable picks.
+    Uses umpire data injected into pick via pick.layer_outputs data or custom attr by daily_runner.
+    Strongest when combined with command pitcher (low BB9) + tight zone umpire.
+    """
+    out = LayerOutput(16, "Umpire Tendencies", passed=True)
+
+    # Umpire data injected by daily_runner as a custom attribute on the pick
+    umpire_data: dict = getattr(pick, "_umpire_data", {})
+    if not umpire_data:
+        out.notes.append("Layer 16: No umpire data available for this game.")
+        return out
+
+    umpire_name = umpire_data.get("umpire_name", "Unknown")
+    over_pct    = umpire_data.get("over_pct",   0.50)
+    under_pct   = umpire_data.get("under_pct",  0.50)
+
+    notes: list[str] = []
+    factors: list[str] = []
+
+    backing_sp = pick.backing_pitcher
+    command_pitcher = backing_sp.bb9 <= 2.5  # low walk rate = command pitcher
+
+    if under_pct >= 0.58:
+        factor_label = "tight_zone_umpire"
+        factors.append(factor_label)
+        combined = command_pitcher and under_pct >= 0.58
+        if combined:
+            notes.append(
+                f"STRONG POSITIVE: {umpire_name} calls UNDER {under_pct:.0%} of games "
+                f"+ {backing_sp.name} has elite command (BB/9 {backing_sp.bb9:.1f}) — "
+                "tight zone + command pitcher is premium pitcher-favorable combination."
+            )
+        else:
+            notes.append(
+                f"POSITIVE: {umpire_name} calls UNDER {under_pct:.0%} of games — "
+                "tight zone umpire favors pitching picks and low-total bets."
+            )
+        out.data["tight_zone_umpire"] = True
+
+    elif over_pct >= 0.58:
+        notes.append(
+            f"MILD WARN: {umpire_name} calls OVER {over_pct:.0%} of games — "
+            "liberal zone may slightly undercut strong pitching pick confidence."
+        )
+        out.data["liberal_zone_umpire"] = True
+
+    else:
+        notes.append(
+            f"NEUTRAL: {umpire_name} — over {over_pct:.0%} / under {under_pct:.0%} "
+            "(no strong directional lean)."
+        )
+
+    out.notes.extend(notes)
+    out.data["umpire_factors"] = factors
+    out.data["umpire_name"]    = umpire_name
+    pick.factors.extend(factors)
+    return out
+
+
 def _extract_keywords_for_weight(factor_str: str) -> list[str]:
     """Map a factor string to weight lookup keys (mirrors weight_trainer._extract_factor_keywords)."""
     kws = []
@@ -858,8 +1131,10 @@ def run_all_layers(
     line_moved_toward_backing: bool | None = None,
 ) -> PickCandidate:
     """
-    Execute all 12 layers in sequence for one pick candidate.
+    Execute all 16 layers in sequence for one pick candidate.
     Returns the pick with tier, market, factors, and all layer outputs attached.
+    Layers 1-12: core analysis pipeline.
+    Layers 13-16: Tier 1 enrichment (xStats, velocity, catcher framing, umpire).
     """
     layers_fn = [
         lambda: layer_1_identity(pick),
@@ -873,6 +1148,11 @@ def run_all_layers(
         lambda: layer_9_sharp_money(pick, handle_pct, ticket_pct, line_moved_toward_backing),
         lambda: layer_10_losing_scenario(pick, losing_scenario, losing_pct),
         lambda: layer_11_factor_count(pick, confirmed_factors),
+        # Tier 1 enrichment layers — informational, never skip the pick on their own
+        lambda: layer_13_xstats(pick),
+        lambda: layer_14_velocity(pick),
+        lambda: layer_15_catcher_framing(pick),
+        lambda: layer_16_umpire(pick),
     ]
 
     for fn in layers_fn:
