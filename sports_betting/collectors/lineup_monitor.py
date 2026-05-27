@@ -139,37 +139,11 @@ def _fetch_rotowire(date_str: str) -> dict[str, dict]:
 
 def _fetch_mlb_api(date_str: str) -> dict[str, dict]:
     """
-    Fetch confirmed lineups from MLB Stats API schedule hydration.
-    Returns {team_abbrev: {lineup_confirmed, value_score, missing_spots, tbd_count}}.
+    MLB Stats API hydrate=lineups endpoint is not reachable from cloud hosting.
+    RotoWire is the primary lineup source; this path is disabled to avoid
+    an 8-second connect timeout on every boot.
     """
-    result: dict[str, dict] = {}
-    try:
-        url = _MLB_SCHEDULE_URL.format(date=date_str)
-        resp = requests.get(url, timeout=8)
-        resp.raise_for_status()
-        data = resp.json()
-
-        for date_entry in data.get("dates", []):
-            for game in date_entry.get("games", []):
-                lineups = game.get("lineups", {})
-                for side in ("homePlayers", "awayPlayers"):
-                    players = lineups.get(side, [])
-                    team_data = (
-                        game.get("teams", {}).get("home" if side == "homePlayers" else "away", {})
-                    )
-                    team_abbr = team_data.get("team", {}).get("abbreviation", "")
-                    if not team_abbr:
-                        continue
-                    batters = [p.get("fullName", "TBD") for p in players if p.get("fullName")]
-                    info = _score_lineup(batters)
-                    if players:
-                        info["lineup_confirmed"] = True
-                    result[team_abbr.upper()] = info
-
-    except Exception as exc:
-        logger.warning("lineup_monitor: MLB API lineup fetch failed: %s", exc)
-
-    return result
+    return {}
 
 
 def get_lineups(date_str: str | None = None) -> dict[str, dict]:
