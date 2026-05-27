@@ -14,6 +14,7 @@ import logging
 import time
 
 import requests
+from .savant_headers import SAVANT_HEADERS
 
 logger = logging.getLogger(__name__)
 
@@ -26,12 +27,7 @@ _OAA_URL = (
     "?type=Fielder&year=2026&team=1&min=1&csv=true"
 )
 
-_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-    )
-}
+_HEADERS = SAVANT_HEADERS
 
 # Baseball Savant team abbreviation → full team name mapping
 # Used to normalize team keys when merging with other data sources

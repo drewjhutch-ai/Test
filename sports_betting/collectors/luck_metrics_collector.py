@@ -1,155 +1,141 @@
 """
 Luck Metrics Collector — Tier 3, Layer 22.
-Fetches team BABIP (batting) and pitcher LOB% (strand rate) from FanGraphs.
+Fetches team luck indicators from Baseball Savant:
+  - Batting luck: team avg (xBA - BA) gap — negative gap = over-performing luck
+  - Pitching luck: team avg (xBA_against - BA_against) gap
 Returns a luck_score for each team indicating whether recent results are
 luck-inflated (+) or luck-deflated (-).
 """
 from __future__ import annotations
-import logging
+import csv
 import io
+import logging
+import time
 
 import requests
+from .savant_headers import SAVANT_HEADERS
 
 logger = logging.getLogger(__name__)
 
-_BATTING_URL = (
-    "https://www.fangraphs.com/api/leaders/major-league/data"
-    "?age=&pos=all&stats=bat&lg=all&qual=0&season=2026&season1=2026"
-    "&ind=0&team=0,ts&pageitems=50&pagenum=1&type=0&sortcol=11"
-    "&sortdir=desc&rosters=false&players=0&month=0"
-    "&startdate=2026-01-01&enddate=2026-12-31&csv=true"
+_CACHE: dict = {}
+_CACHE_TS: float = 0.0
+_TTL: float = 6 * 3600
+
+# Batter expected stats — xba vs ba gap indicates BABIP luck
+_BATTER_URL = (
+    "https://baseballsavant.mlb.com/leaderboard/expected_statistics"
+    "?type=batter&year=2026&position=&team=&min=25&csv=true"
+)
+# Pitcher expected stats — xba_against vs ba_against gap indicates strand/BABIP luck
+_PITCHER_URL = (
+    "https://baseballsavant.mlb.com/leaderboard/expected_statistics"
+    "?type=pitcher&year=2026&position=&team=&min=25&csv=true"
 )
 
-_PITCHING_URL = (
-    "https://www.fangraphs.com/api/leaders/major-league/data"
-    "?age=&pos=all&stats=pit&lg=all&qual=0&season=2026&season1=2026"
-    "&ind=0&team=0,ts&pageitems=50&pagenum=1&type=0&sortcol=11"
-    "&sortdir=desc&rosters=false&players=0&month=0"
-    "&startdate=2026-01-01&enddate=2026-12-31&csv=true"
-)
-
-# FanGraphs uses these team name abbreviations in CSV exports
-_FG_TEAM_MAP: dict[str, str] = {
-    "Angels": "LAA", "Astros": "HOU", "Athletics": "OAK", "Blue Jays": "TOR",
-    "Braves": "ATL", "Brewers": "MIL", "Cardinals": "STL", "Cubs": "CHC",
-    "D-backs": "ARI", "Diamondbacks": "ARI", "Dodgers": "LAD", "Giants": "SF",
-    "Guardians": "CLE", "Indians": "CLE", "Mariners": "SEA", "Marlins": "MIA",
-    "Mets": "NYM", "Nationals": "WSH", "Orioles": "BAL", "Padres": "SD",
-    "Phillies": "PHI", "Pirates": "PIT", "Rangers": "TEX", "Rays": "TB",
-    "Red Sox": "BOS", "Reds": "CIN", "Rockies": "COL", "Royals": "KC",
-    "Tigers": "DET", "Twins": "MIN", "White Sox": "CWS", "Yankees": "NYY",
-}
+_HEADERS = SAVANT_HEADERS
 
 
-def _parse_pct(val: str) -> float:
-    """Convert '30.5 %' or '0.305' or '30.5%' to float 0.305."""
+def _safe_float(val: str | None, default: float = 0.0) -> float:
     try:
-        s = val.strip().replace("%", "").replace(" ", "")
-        f = float(s)
-        return f / 100 if f > 1.0 else f
-    except (ValueError, AttributeError):
-        return 0.0
+        return float(val) if val not in (None, "", "null") else default
+    except (ValueError, TypeError):
+        return default
 
 
 def _fetch_csv(url: str) -> list[dict]:
-    """Fetch a FanGraphs CSV endpoint and return list-of-dicts."""
     try:
-        resp = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0"})
+        resp = requests.get(url, headers=_HEADERS, timeout=12)
+        if resp.status_code == 403:
+            logger.warning("luck_metrics_collector: Savant returned 403 for %s", url)
+            return []
         resp.raise_for_status()
-        import csv
-        reader = csv.DictReader(io.StringIO(resp.text))
-        return [row for row in reader]
+        return list(csv.DictReader(io.StringIO(resp.text)))
     except Exception as exc:
         logger.warning("luck_metrics_collector: CSV fetch failed (%s): %s", url[:60], exc)
         return []
 
 
-def _abbrev(team_raw: str) -> str:
-    """Normalise FanGraphs team name → standard 2-3 letter abbrev."""
-    t = team_raw.strip()
-    if t in _FG_TEAM_MAP:
-        return _FG_TEAM_MAP[t]
-    # Already an abbreviation?
-    if len(t) <= 3:
-        return t.upper()
-    # Partial match
-    for name, abbr in _FG_TEAM_MAP.items():
-        if name.lower() in t.lower() or t.lower() in name.lower():
-            return abbr
-    return t[:3].upper()
-
-
 def get_luck_metrics() -> dict[str, dict]:
     """
-    Fetch team BABIP (batting) and pitcher LOB% (strand rate) from FanGraphs.
+    Compute team luck scores from Baseball Savant xBA vs BA gaps.
 
     Returns:
-        {team_abbrev: {babip, lob_pct, luck_score}}
+        {team_abbrev: {babip_proxy, xba_gap_batting, xba_gap_pitching, luck_score}}
         luck_score range -4 to +4:
             positive = luck-inflated (expect regression)
             negative = luck-deflated (expect improvement)
     """
-    babip_by_team: dict[str, float] = {}
-    lob_by_team: dict[str, float] = {}
+    global _CACHE, _CACHE_TS
+    now = time.time()
+    if _CACHE and (now - _CACHE_TS) < _TTL:
+        return _CACHE
 
-    # ── Batting CSV — BABIP ───────────────────────────────────────────
-    batting_rows = _fetch_csv(_BATTING_URL)
-    for row in batting_rows:
-        team_raw = row.get("Team", row.get("team", ""))
-        if not team_raw:
+    # ── Batting: accumulate (xba - ba) gap per team ───────────────────
+    bat_gap: dict[str, list[float]] = {}
+    for row in _fetch_csv(_BATTER_URL):
+        team = row.get("team_name_abbrev", row.get("team", "")).strip().upper()
+        if not team:
             continue
-        abbr = _abbrev(team_raw)
-        # FanGraphs BABIP column header variants
-        for col in ("BABIP", "babip"):
-            raw = row.get(col, "")
-            if raw:
-                babip_by_team[abbr] = _parse_pct(raw)
-                break
-
-    # ── Pitching CSV — LOB% ───────────────────────────────────────────
-    pitching_rows = _fetch_csv(_PITCHING_URL)
-    for row in pitching_rows:
-        team_raw = row.get("Team", row.get("team", ""))
-        if not team_raw:
+        xba = _safe_float(row.get("xba"), -1.0)
+        ba  = _safe_float(row.get("ba"),  -1.0)
+        if xba < 0 or ba < 0:
             continue
-        abbr = _abbrev(team_raw)
-        # FanGraphs strand-rate column variants
-        for col in ("LOB%", "lob%", "LOB", "Strand%", "strand%"):
-            raw = row.get(col, "")
-            if raw:
-                lob_by_team[abbr] = _parse_pct(raw)
-                break
+        # negative gap (xba < ba) means batter is over-performing luck
+        bat_gap.setdefault(team, []).append(xba - ba)
 
-    # ── Build output ──────────────────────────────────────────────────
-    all_teams = set(babip_by_team) | set(lob_by_team)
+    # ── Pitching: accumulate (xba_against - ba_against) gap per team ──
+    pit_gap: dict[str, list[float]] = {}
+    for row in _fetch_csv(_PITCHER_URL):
+        team = row.get("team_name_abbrev", row.get("team", "")).strip().upper()
+        if not team:
+            continue
+        xba = _safe_float(row.get("xba"), -1.0)
+        ba  = _safe_float(row.get("ba"),  -1.0)
+        if xba < 0 or ba < 0:
+            continue
+        # negative gap (xba < ba) means pitcher has been unlucky (balls falling in)
+        pit_gap.setdefault(team, []).append(xba - ba)
+
+    all_teams = set(bat_gap) | set(pit_gap)
     result: dict[str, dict] = {}
 
-    for abbr in all_teams:
-        babip = babip_by_team.get(abbr, 0.295)
-        lob   = lob_by_team.get(abbr, 0.720)
+    for team in all_teams:
+        b_vals = bat_gap.get(team, [])
+        p_vals = pit_gap.get(team, [])
+
+        avg_bat_gap = sum(b_vals) / len(b_vals) if b_vals else 0.0
+        avg_pit_gap = sum(p_vals) / len(p_vals) if p_vals else 0.0
 
         luck_score = 0.0
-        # Offense: BABIP
-        if babip > 0.320:
-            luck_score += 2   # Over-performing; expect regression
-        elif babip < 0.270:
-            luck_score -= 2   # Under-performing; expect recovery
+        # Batting luck: xba < ba (avg_bat_gap < 0) means batters over-performing → +luck
+        if avg_bat_gap < -0.015:
+            luck_score += 2   # offensive over-performance; expect regression
+        elif avg_bat_gap > 0.015:
+            luck_score -= 2   # offensive under-performance; expect recovery
 
-        # Pitching: LOB%
-        if lob > 0.78:
-            luck_score += 2   # Stranding too many; regression coming
-        elif lob < 0.68:
-            luck_score -= 2   # Strand rate unsustainably low
+        # Pitching luck: xba < ba_against (avg_pit_gap < 0) means pitchers unlucky
+        if avg_pit_gap < -0.015:
+            luck_score -= 2   # pitching worse than skill; expect improvement
+        elif avg_pit_gap > 0.015:
+            luck_score += 2   # pitching luckier than skill; expect regression
 
-        result[abbr] = {
-            "babip":      round(babip, 3),
-            "lob_pct":    round(lob, 3),
-            "luck_score": luck_score,
+        # babip: convert xba gap to a BABIP-like value (league avg ~0.295)
+        babip_est = round(0.295 - avg_bat_gap, 3)
+        result[team] = {
+            "babip":              babip_est,
+            "lob_pct":            0.720,       # not available from Savant; use league avg
+            "xba_gap_batting":    round(avg_bat_gap, 4),
+            "xba_gap_pitching":   round(avg_pit_gap, 4),
+            "luck_score":         luck_score,
         }
 
     if not result:
-        logger.info("luck_metrics_collector: no data returned (FanGraphs unavailable)")
+        logger.warning("luck_metrics_collector: no data returned (Savant unavailable)")
     else:
         logger.info("luck_metrics_collector: fetched %d teams", len(result))
 
-    return result
+    if result:
+        _CACHE = result
+        _CACHE_TS = now
+
+    return _CACHE

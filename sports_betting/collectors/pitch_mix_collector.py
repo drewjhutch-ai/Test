@@ -19,6 +19,7 @@ import time
 from datetime import datetime, timedelta
 
 import requests
+from .savant_headers import SAVANT_HEADERS
 
 logger = logging.getLogger(__name__)
 
@@ -30,12 +31,7 @@ _RECENT_CACHE_TS: float = 0.0
 
 _TTL: float = 6 * 3600  # 6 hours
 
-_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-    )
-}
+_HEADERS = SAVANT_HEADERS
 
 _ARSENAL_URL = (
     "https://baseballsavant.mlb.com/leaderboard/pitch-arsenal-stats"

@@ -9,6 +9,7 @@ import logging
 import time
 
 import requests
+from .savant_headers import SAVANT_HEADERS
 
 logger = logging.getLogger(__name__)
 
@@ -22,12 +23,7 @@ _URL = (
     "?type=pitcher&pitchType=FF&year=2026&team=&min=10&csv=true"
 )
 
-_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-    )
-}
+_HEADERS = SAVANT_HEADERS
 
 
 def _safe_float(val: str | None, default: float = 0.0) -> float:

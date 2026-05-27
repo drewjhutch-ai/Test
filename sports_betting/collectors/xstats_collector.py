@@ -10,6 +10,7 @@ import logging
 import time
 
 import requests
+from .savant_headers import SAVANT_HEADERS
 
 logger = logging.getLogger(__name__)
 
@@ -36,27 +37,14 @@ _BATTER_URL = (
     "?type=batter&year=2026&position=&team=&min=25&csv=true"
 )
 
-# FanGraphs CSW% leaderboard URL (type=36 = CSW% stat group)
-_FG_CSW_URL = (
-    "https://www.fangraphs.com/api/leaders/major-league/data"
-    "?age=&pos=all&stats=pit&lg=all&qual=20&season=2026&season1=2026"
-    "&ind=0&team=0&pageitems=2000&pagenum=1&type=36&sortcol=16&sortdir=desc"
-    "&rosters=false&players=0&month=0&startdate=2026-01-01&enddate=2026-12-31&csv=true"
+# Baseball Savant pitch arsenal stats — replaces FanGraphs for CSW%/Stuff+
+# whiff_percent ≈ CSW% proxy; xwoba_against used as Stuff+ proxy
+_ARSENAL_URL = (
+    "https://baseballsavant.mlb.com/leaderboard/pitch-arsenal-stats"
+    "?type=pitcher&pitchType=&year=2026&team=&min=25&csv=true"
 )
 
-# FanGraphs Stuff+ URL (same stat group, different sort)
-_FG_STUFF_URL = (
-    "https://www.fangraphs.com/api/leaders/major-league/data"
-    "?age=&pos=all&stats=pit&lg=all&qual=20&season=2026&season1=2026"
-    "&ind=0&team=0&pageitems=2000&pagenum=1&type=36&csv=true"
-)
-
-_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-    )
-}
+_HEADERS = SAVANT_HEADERS
 
 
 def _fetch_csv(url: str) -> list[dict]:
@@ -174,47 +162,40 @@ def get_team_xwoba() -> dict[str, dict]:
 
 def get_pitcher_csw() -> dict[str, float]:
     """
-    Fetch FanGraphs CSW% (Called Strike + Whiff %) leaderboard for 2026.
-
+    CSW% proxy from Baseball Savant pitch arsenal stats.
+    Uses whiff_percent column as called-strike+whiff rate proxy.
     Returns dict keyed by pitcher name → CSW rate (0.0–1.0 float).
-    Returns {} on any failure. Cached 6-hour TTL.
+    Cached 6-hour TTL.
     """
     global _CSW_CACHE, _CSW_CACHE_TS
     now = time.time()
     if _CSW_CACHE and (now - _CSW_CACHE_TS) < _TTL:
         return _CSW_CACHE
 
-    try:
-        resp = requests.get(_FG_CSW_URL, headers=_HEADERS, timeout=12)
-        resp.raise_for_status()
-        reader = csv.DictReader(io.StringIO(resp.text))
-        rows = list(reader)
-    except Exception as exc:
-        logger.warning("get_pitcher_csw: fetch failed: %s", exc)
-        return _CSW_CACHE  # return stale cache rather than empty
+    rows = _fetch_csv(_ARSENAL_URL)
 
     result: dict[str, float] = {}
     for row in rows:
-        name = (row.get("PlayerName") or row.get("Name") or "").strip()
-        if not name:
+        last  = row.get("last_name", "").strip()
+        first = row.get("first_name", "").strip()
+        if not last:
             continue
-        # Column may be labelled "CSW%" or "CSW"
-        raw = row.get("CSW%") or row.get("CSW") or ""
-        val = _safe_float(raw.replace("%", "") if "%" in raw else raw, default=-1.0)
+        full = f"{first} {last}".strip() if first else last
+
+        # whiff_percent in Savant is already a percentage (e.g. 28.5)
+        raw = row.get("whiff_percent") or row.get("whiff_pct") or ""
+        val = _safe_float(raw, default=-1.0)
         if val < 0:
             continue
-        # FanGraphs may return percentage as 28.5 (meaning 28.5%) or 0.285
         csw_rate = val / 100.0 if val > 1.0 else val
-        result[name] = csw_rate
-        # Also index by last name for fuzzy matching
-        last = name.split()[-1]
+        result[full] = csw_rate
         if last not in result:
             result[last] = csw_rate
 
     if result:
         _CSW_CACHE = result
         _CSW_CACHE_TS = now
-        logger.info("get_pitcher_csw: loaded CSW%% for %d pitchers", len(rows))
+        logger.info("get_pitcher_csw: loaded CSW proxy for %d pitchers", len(rows))
     else:
         logger.warning("get_pitcher_csw: no rows parsed; returning stale or empty cache")
 
@@ -223,51 +204,45 @@ def get_pitcher_csw() -> dict[str, float]:
 
 def get_stuff_plus() -> dict[str, float]:
     """
-    Fetch FanGraphs Stuff+ for 2026.
-
-    Returns dict keyed by pitcher name → Stuff+ value (100 = league average).
-    Falls back to xFIP- as proxy if Stuff+ column absent.
-    Returns {} on failure. Cached 6-hour TTL.
+    Stuff+ proxy from Baseball Savant pitch arsenal stats.
+    Uses xwoba_against (inverted) as stuff quality proxy; 100 = league average.
+    Cached 6-hour TTL.
     """
     global _STUFF_CACHE, _STUFF_CACHE_TS
     now = time.time()
     if _STUFF_CACHE and (now - _STUFF_CACHE_TS) < _TTL:
         return _STUFF_CACHE
 
-    try:
-        resp = requests.get(_FG_STUFF_URL, headers=_HEADERS, timeout=12)
-        resp.raise_for_status()
-        reader = csv.DictReader(io.StringIO(resp.text))
-        rows = list(reader)
-    except Exception as exc:
-        logger.warning("get_stuff_plus: fetch failed: %s", exc)
-        return _STUFF_CACHE
+    rows = _fetch_csv(_ARSENAL_URL)
+
+    # Collect xwoba_against values to compute league average for normalisation
+    raw_vals: list[tuple[str, str, float]] = []
+    for row in rows:
+        last  = row.get("last_name", "").strip()
+        first = row.get("first_name", "").strip()
+        if not last:
+            continue
+        full = f"{first} {last}".strip() if first else last
+        xwoba = _safe_float(row.get("xwoba_against") or row.get("xwoba") or "", default=-1.0)
+        if xwoba >= 0:
+            raw_vals.append((full, last, xwoba))
 
     result: dict[str, float] = {}
-    for row in rows:
-        name = (row.get("PlayerName") or row.get("Name") or "").strip()
-        if not name:
-            continue
-        # Try Stuff+ column first
-        raw = row.get("Stuff+") or row.get("stuff_plus") or ""
-        val = _safe_float(raw, default=-1.0)
-        if val < 0:
-            # Fallback: use xFIP- as proxy (inverted: lower = better → convert to >100 = better scale)
-            xfip_minus = _safe_float(row.get("xFIP-") or row.get("xfip_minus") or "", default=-1.0)
-            if xfip_minus > 0:
-                # xFIP- 100 = avg; invert so that 100 = avg and higher = better (like Stuff+)
-                val = 200.0 - xfip_minus
-            else:
-                continue
-        result[name] = val
-        last = name.split()[-1]
-        if last not in result:
-            result[last] = val
+    if raw_vals:
+        avg_xwoba = sum(v for _, _, v in raw_vals) / len(raw_vals)
+        avg_xwoba = avg_xwoba if avg_xwoba > 0 else 0.320
+        for full, last, xwoba in raw_vals:
+            # Lower xwoba_against → better stuff → above 100
+            stuff = 100.0 * (avg_xwoba / xwoba) if xwoba > 0 else 100.0
+            stuff = round(stuff, 1)
+            result[full] = stuff
+            if last not in result:
+                result[last] = stuff
 
     if result:
         _STUFF_CACHE = result
         _STUFF_CACHE_TS = now
-        logger.info("get_stuff_plus: loaded Stuff+ for %d pitchers", len(rows))
+        logger.info("get_stuff_plus: loaded Stuff+ proxy for %d pitchers", len(rows))
     else:
         logger.warning("get_stuff_plus: no rows parsed; returning stale or empty cache")
 
