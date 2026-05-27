@@ -49,7 +49,8 @@ def _fetch_csv(url: str) -> list[dict]:
             logger.warning("luck_metrics_collector: Savant returned 403 for %s", url)
             return []
         resp.raise_for_status()
-        return list(csv.DictReader(io.StringIO(resp.text)))
+        text = resp.content.decode("utf-8-sig", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+        return list(csv.DictReader(io.StringIO(text)))
     except Exception as exc:
         logger.warning("luck_metrics_collector: CSV fetch failed (%s): %s", url[:60], exc)
         return []

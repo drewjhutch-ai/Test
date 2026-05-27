@@ -55,7 +55,8 @@ def _fetch_csv(url: str) -> list[dict]:
             logger.warning("Baseball Savant returned 403 for %s", url)
             return []
         resp.raise_for_status()
-        reader = csv.DictReader(io.StringIO(resp.text))
+        text = resp.content.decode("utf-8-sig", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+        reader = csv.DictReader(io.StringIO(text))
         return list(reader)
     except Exception as exc:
         logger.warning("xstats_collector fetch failed (%s): %s", url, exc)

@@ -57,7 +57,8 @@ def get_velocity_data() -> dict[str, dict]:
             logger.warning("velocity_tracker: Baseball Savant returned 403")
             return _CACHE  # return stale
         resp.raise_for_status()
-        rows = list(csv.DictReader(io.StringIO(resp.text)))
+        text = resp.content.decode("utf-8-sig", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+        rows = list(csv.DictReader(io.StringIO(text)))
     except Exception as exc:
         logger.warning("velocity_tracker: fetch failed: %s", exc)
         return _CACHE

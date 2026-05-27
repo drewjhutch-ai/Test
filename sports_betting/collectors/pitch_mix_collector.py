@@ -68,8 +68,8 @@ def _fetch_csv(url: str) -> list[dict]:
             logger.warning("pitch_mix_collector: 403 for %s", url[:80])
             return []
         resp.raise_for_status()
-        reader = csv.DictReader(io.StringIO(resp.text))
-        return list(reader)
+        text = resp.content.decode("utf-8-sig", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+        return list(csv.DictReader(io.StringIO(text)))
     except Exception as exc:
         logger.warning("pitch_mix_collector: fetch failed (%s): %s", url[:80], exc)
         return []

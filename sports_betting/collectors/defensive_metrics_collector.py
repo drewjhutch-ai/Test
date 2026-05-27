@@ -81,8 +81,8 @@ def get_team_oaa() -> dict[str, dict]:
             logger.warning("defensive_metrics_collector: Baseball Savant returned 403")
             return _CACHE
         resp.raise_for_status()
-        reader = csv.DictReader(io.StringIO(resp.text))
-        rows = list(reader)
+        text = resp.content.decode("utf-8-sig", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+        rows = list(csv.DictReader(io.StringIO(text)))
     except Exception as exc:
         logger.warning("defensive_metrics_collector: fetch failed: %s", exc)
         return _CACHE

@@ -44,7 +44,8 @@ def _fetch_framing_csv() -> dict[str, float]:
             logger.warning("catcher_framing_collector: Savant returned 403")
             return {}
         resp.raise_for_status()
-        rows = list(csv.DictReader(io.StringIO(resp.text)))
+        text = resp.content.decode("utf-8-sig", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+        rows = list(csv.DictReader(io.StringIO(text)))
     except Exception as exc:
         logger.warning("catcher_framing_collector: CSV fetch failed: %s", exc)
         return {}
