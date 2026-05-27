@@ -1,13 +1,13 @@
 """
 Catcher framing collector.
 No framing data in MLB Stats API. Uses team caught-stealing percentage
-(CS / (CS + SB)) as a proxy — good framers also tend to suppress the running
-game. Converts CS% to a framing_runs-like scale.
+(CS / (CS + SB)) as a proxy. Fetches all 30 teams in parallel.
 Cached module-level with ~6-hour TTL.
 """
 from __future__ import annotations
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
@@ -33,63 +33,59 @@ def _safe_float(val, default: float = 0.0) -> float:
 
 
 def _cs_pct_to_framing(cs_pct: float) -> float:
-    """Convert caught-stealing % to a framing_runs-like proxy on ~[-6, +6] scale."""
-    if cs_pct > 0.35:
-        return 5.0
-    if cs_pct > 0.30:
-        return 3.0
-    if cs_pct > 0.25:
-        return 1.0
-    if cs_pct > 0.20:
-        return -1.0
-    if cs_pct > 0.15:
-        return -3.0
+    if cs_pct > 0.35: return 5.0
+    if cs_pct > 0.30: return 3.0
+    if cs_pct > 0.25: return 1.0
+    if cs_pct > 0.20: return -1.0
+    if cs_pct > 0.15: return -3.0
     return -5.0
 
 
+def _fetch_team(team_id: int, abbrev: str) -> tuple[str, float] | None:
+    try:
+        url = _TEAM_STATS_URL.format(team_id=team_id)
+        resp = requests.get(url, headers=_HEADERS, timeout=5)
+        resp.raise_for_status()
+        splits = resp.json().get("stats", [{}])[0].get("splits", [])
+        if not splits:
+            return None
+        stat = splits[0].get("stat", {})
+        cs = _safe_float(stat.get("caughtStealing"), 0.0)
+        sb = _safe_float(stat.get("stolenBases"), 0.0)
+        total = cs + sb
+        if total < 5:
+            return None
+        return abbrev, _cs_pct_to_framing(cs / total)
+    except Exception:
+        return None
+
+
 def get_framing_by_team() -> dict[str, float]:
-    """
-    Returns {team_abbrev: framing_runs_proxy}.
-    Positive = above-average framing; negative = below-average.
-    """
+    """Returns {team_abbrev: framing_runs_proxy}. All 30 teams fetched in parallel."""
     global _FRAMING_CACHE, _CACHE_TS
     now = time.time()
     if _FRAMING_CACHE and (now - _CACHE_TS) < _TTL:
         return _FRAMING_CACHE
 
     try:
-        teams_resp = requests.get(_TEAMS_URL, headers=_HEADERS, timeout=12)
+        teams_resp = requests.get(_TEAMS_URL, headers=_HEADERS, timeout=10)
         teams_resp.raise_for_status()
-        teams = teams_resp.json().get("teams", [])
+        teams = [
+            (t.get("id"), t.get("abbreviation", "").strip().upper())
+            for t in teams_resp.json().get("teams", [])
+            if t.get("id") and t.get("abbreviation")
+        ]
     except Exception as exc:
         logger.warning("catcher_framing_collector: teams fetch failed: %s", exc)
         return _FRAMING_CACHE
 
     result: dict[str, float] = {}
-
-    for team in teams:
-        team_id = team.get("id")
-        abbrev  = team.get("abbreviation", "").strip().upper()
-        if not team_id or not abbrev:
-            continue
-        try:
-            url = _TEAM_STATS_URL.format(team_id=team_id)
-            resp = requests.get(url, headers=_HEADERS, timeout=10)
-            resp.raise_for_status()
-            data = resp.json()
-            splits = data.get("stats", [{}])[0].get("splits", [])
-            if not splits:
-                continue
-            stat = splits[0].get("stat", {})
-            cs = _safe_float(stat.get("caughtStealing"), 0.0)
-            sb = _safe_float(stat.get("stolenBases"), 0.0)
-            total = cs + sb
-            if total < 5:
-                continue
-            cs_pct = cs / total
-            result[abbrev] = _cs_pct_to_framing(cs_pct)
-        except Exception:
-            continue
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futures = {pool.submit(_fetch_team, tid, abbr): abbr for tid, abbr in teams}
+        for fut in as_completed(futures):
+            val = fut.result()
+            if val:
+                result[val[0]] = val[1]
 
     if result:
         _FRAMING_CACHE = result
@@ -99,3 +95,4 @@ def get_framing_by_team() -> dict[str, float]:
         logger.warning("catcher_framing_collector: empty result; using stale cache")
 
     return _FRAMING_CACHE
+
