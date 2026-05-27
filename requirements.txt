@@ -19,3 +19,4 @@ pybaseball>=2.2.7
 twilio>=8.0.0
 streamlit>=1.35.0
 anthropic>=0.40.0
+psycopg2-binary>=2.9.0

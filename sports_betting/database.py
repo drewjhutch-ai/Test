@@ -1,29 +1,192 @@
+"""
+Database layer — SQLite for local dev, PostgreSQL/Supabase when DATABASE_URL is set.
+
+All queries may be written in SQLite dialect (? placeholders, :name params,
+datetime('now'), INSERT OR IGNORE, etc.). _PGConn transparently converts to
+PostgreSQL syntax at runtime when DATABASE_URL is detected.
+"""
+from __future__ import annotations
+import os
+import re
 import sqlite3
-import json
 import logging
-from datetime import datetime, timezone
 from contextlib import contextmanager
-from pathlib import Path
-from .config import DB_PATH
+from datetime import datetime as _dt, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
 
+# ── Backend detection ──────────────────────────────────────────────────
+
+def _load_db_url() -> str:
+    url = os.environ.get("DATABASE_URL", "")
+    if url:
+        return url
+    try:
+        import streamlit as st
+        return st.secrets.get("DATABASE_URL", "") or ""
+    except Exception:
+        return ""
+
+
+DATABASE_URL: str = _load_db_url()
+_USE_PG: bool = bool(DATABASE_URL)
+
+if _USE_PG:
+    logger.info("database: using PostgreSQL / Supabase")
+else:
+    from .config import DB_PATH
+    logger.info("database: using SQLite")
+
+
+# ── SQLite → PostgreSQL SQL translation ───────────────────────────────
+
+_RE_TEXT_TS  = re.compile(r"TEXT\s+DEFAULT\s+\(datetime\('now'\)\)", re.I)
+_RE_INS_IGN  = re.compile(r"INSERT\s+OR\s+IGNORE\s+INTO", re.I)
+_RE_DT_INTV  = re.compile(r"datetime\('now',\s*['\"](-?\d+)\s+(\w+)['\"]\)", re.I)
+_RE_DT_NOW   = re.compile(r"datetime\('now'\)", re.I)
+_RE_DATE_NOW = re.compile(r"date\('now'\)", re.I)
+_RE_AUTOINC  = re.compile(r"INTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT", re.I)
+_RE_NAMED    = re.compile(r":([a-zA-Z_]\w*)")
+
+
+def _to_pg(sql: str) -> str:
+    """Convert SQLite-dialect SQL to PostgreSQL."""
+    had_ignore = bool(_RE_INS_IGN.search(sql))
+
+    # DDL: TEXT timestamp columns → TIMESTAMPTZ
+    sql = _RE_TEXT_TS.sub("TIMESTAMPTZ DEFAULT NOW()", sql)
+    # INSERT OR IGNORE → INSERT (ON CONFLICT DO NOTHING appended later)
+    sql = _RE_INS_IGN.sub("INSERT INTO", sql)
+    # datetime('now', '-N unit') → NOW() - INTERVAL 'N unit'
+    sql = _RE_DT_INTV.sub(
+        lambda m: f"NOW() - INTERVAL '{abs(int(m.group(1)))} {m.group(2)}'", sql
+    )
+    # datetime('now') → NOW()
+    sql = _RE_DT_NOW.sub("NOW()", sql)
+    # date('now') → CURRENT_DATE
+    sql = _RE_DATE_NOW.sub("CURRENT_DATE", sql)
+    # INTEGER PRIMARY KEY AUTOINCREMENT → SERIAL PRIMARY KEY
+    sql = _RE_AUTOINC.sub("SERIAL PRIMARY KEY", sql)
+    sql = sql.replace("AUTOINCREMENT", "")
+    # ? → %s  (positional params)
+    sql = sql.replace("?", "%s")
+    # :name → %(name)s  (named params)
+    sql = _RE_NAMED.sub(r"%(\1)s", sql)
+    # Append ON CONFLICT DO NOTHING for INSERT OR IGNORE
+    if had_ignore and "ON CONFLICT" not in sql.upper():
+        sql = sql.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
+
+    return sql
+
+
+# ── psycopg2 result normalisation ─────────────────────────────────────
+
+def _norm(val):
+    """Convert psycopg2 datetime/date objects → ISO strings (matches SQLite output)."""
+    import datetime as _datetime_mod
+    if isinstance(val, _dt):
+        return val.isoformat()
+    if isinstance(val, _datetime_mod.date):
+        return val.isoformat()
+    return val
+
+
+def _norm_row(row) -> dict:
+    return {k: _norm(v) for k, v in dict(row).items()}
+
+
+# ── psycopg2 wrapper ──────────────────────────────────────────────────
+
+class _PGCursor:
+    def __init__(self, cur):
+        self._cur = cur
+
+    def fetchone(self) -> dict | None:
+        row = self._cur.fetchone()
+        return _norm_row(row) if row else None
+
+    def fetchall(self) -> list[dict]:
+        return [_norm_row(r) for r in self._cur.fetchall()]
+
+    @property
+    def rowcount(self) -> int:
+        return self._cur.rowcount
+
+
+class _PGConn:
+    """Wraps a psycopg2 connection to look like a sqlite3 connection."""
+
+    def __init__(self, raw):
+        self._raw = raw
+
+    def _cur(self):
+        import psycopg2.extras
+        return self._raw.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+    def execute(self, sql: str, params=None) -> _PGCursor:
+        cur = self._cur()
+        cur.execute(_to_pg(sql), params)
+        return _PGCursor(cur)
+
+    def executemany(self, sql: str, params_list):
+        cur = self._cur()
+        pg = _to_pg(sql)
+        for p in params_list:
+            cur.execute(pg, p)
+        return self
+
+    def executescript(self, script: str):
+        """Emulate sqlite3.executescript — splits on ; and runs each statement."""
+        cur = self._cur()
+        for stmt in script.split(";"):
+            stmt = stmt.strip()
+            if stmt:
+                cur.execute(_to_pg(stmt))
+        return self
+
+    def commit(self):
+        self._raw.commit()
+
+    def rollback(self):
+        self._raw.rollback()
+
+    def close(self):
+        self._raw.close()
+
+
+# ── Context manager ────────────────────────────────────────────────────
+
 @contextmanager
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+    if _USE_PG:
+        import psycopg2
+        raw = psycopg2.connect(DATABASE_URL)
+        conn = _PGConn(raw)
+        try:
+            yield conn
+            raw.commit()
+        except Exception:
+            raw.rollback()
+            raise
+        finally:
+            raw.close()
+    else:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
+
+# ── Schema ─────────────────────────────────────────────────────────────
 
 def init_db():
     with get_db() as conn:
@@ -239,10 +402,12 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_value_bets_detected ON value_bets(detected_at);
             CREATE INDEX IF NOT EXISTS idx_arb_detected ON arbitrage_opportunities(detected_at, expired);
             CREATE INDEX IF NOT EXISTS idx_team_stats ON team_stats(team_name, season);
-            CREATE INDEX IF NOT EXISTS idx_pitcher_stats ON pitcher_stats(player_id, season);
+            CREATE INDEX IF NOT EXISTS idx_pitcher_stats ON pitcher_stats(player_id, season)
         """)
-    logger.info("Database initialized at %s", DB_PATH)
+    logger.info("Database initialised (%s)", "PostgreSQL" if _USE_PG else f"SQLite @ {DB_PATH}")
 
+
+# ── DML helpers ────────────────────────────────────────────────────────
 
 def upsert_game(game_data: dict):
     with get_db() as conn:
@@ -259,7 +424,6 @@ def upsert_game(game_data: dict):
 
 def insert_odds_snapshot(data: dict):
     with get_db() as conn:
-        # Ensure a parent game row exists before inserting odds (FK constraint)
         conn.execute("""
             INSERT OR IGNORE INTO games (game_id, home_team, away_team, game_date, status)
             VALUES (:game_id,
@@ -334,37 +498,40 @@ def save_sharp_play(data: dict):
 
 
 def get_recent_value_bets(hours: int = 24):
+    cutoff = (_dt.now(timezone.utc) - timedelta(hours=hours)).isoformat()
     with get_db() as conn:
         rows = conn.execute("""
             SELECT vb.*, g.home_team, g.away_team, g.game_date, g.game_time
             FROM value_bets vb
             JOIN games g ON vb.game_id = g.game_id
-            WHERE vb.detected_at >= datetime('now', ? || ' hours')
+            WHERE vb.detected_at >= ?
             ORDER BY vb.edge DESC
-        """, (f"-{hours}",)).fetchall()
+        """, (cutoff,)).fetchall()
         return [dict(r) for r in rows]
 
 
 def get_recent_arb_opportunities(hours: int = 6):
+    cutoff = (_dt.now(timezone.utc) - timedelta(hours=hours)).isoformat()
     with get_db() as conn:
         rows = conn.execute("""
             SELECT ao.*, g.home_team, g.away_team, g.game_date
             FROM arbitrage_opportunities ao
             JOIN games g ON ao.game_id = g.game_id
-            WHERE ao.detected_at >= datetime('now', ? || ' hours')
+            WHERE ao.detected_at >= ?
             AND ao.expired = 0
             ORDER BY ao.profit_pct DESC
-        """, (f"-{hours}",)).fetchall()
+        """, (cutoff,)).fetchall()
         return [dict(r) for r in rows]
 
 
 def get_recent_sharp_plays(hours: int = 24):
+    cutoff = (_dt.now(timezone.utc) - timedelta(hours=hours)).isoformat()
     with get_db() as conn:
         rows = conn.execute("""
             SELECT sp.*, g.home_team, g.away_team, g.game_date
             FROM sharp_plays sp
             JOIN games g ON sp.game_id = g.game_id
-            WHERE sp.detected_at >= datetime('now', ? || ' hours')
+            WHERE sp.detected_at >= ?
             ORDER BY sp.signal_strength DESC
-        """, (f"-{hours}",)).fetchall()
+        """, (cutoff,)).fetchall()
         return [dict(r) for r in rows]
