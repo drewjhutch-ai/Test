@@ -56,8 +56,10 @@ def _fetch_csv(url: str) -> list[dict]:
             return []
         resp.raise_for_status()
         text = resp.content.decode("utf-8-sig", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
-        reader = csv.DictReader(io.StringIO(text))
-        return list(reader)
+        rows = list(csv.DictReader(io.StringIO(text)))
+        if not rows:
+            logger.warning("xstats_collector: 0 rows from %s (response starts: %.120s)", url, text[:120])
+        return rows
     except Exception as exc:
         logger.warning("xstats_collector fetch failed (%s): %s", url, exc)
         return []
