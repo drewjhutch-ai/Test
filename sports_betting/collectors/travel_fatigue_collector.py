@@ -78,18 +78,15 @@ def _tz_offset(team_name: str) -> int:
 
 def _fetch_schedule(date_str: str) -> dict[str, str]:
     """
-    Fetch MLB schedule for date_str and return {team_name: home_venue_city}.
-    Returns {} on failure.
+    Fetch MLB schedule for date_str and return {team_name: home_team_name}.
+    Uses the plain schedule endpoint (no hydration) — hydrate=team,venue
+    consistently times out from cloud hosting.
     """
     try:
         resp = requests.get(
             MLB_SCHEDULE_URL,
-            params={
-                "sportId": 1,
-                "date": date_str,
-                "hydrate": "team,venue",
-            },
-            timeout=12,
+            params={"sportId": 1, "date": date_str},
+            timeout=8,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -97,17 +94,15 @@ def _fetch_schedule(date_str: str) -> dict[str, str]:
         logger.warning("travel_fatigue_collector: schedule fetch failed for %s: %s", date_str, exc)
         return {}
 
-    # Build {team_name: city_where_playing} for each game on that date
     team_location: dict[str, str] = {}
     for date_entry in data.get("dates", []):
         for game in date_entry.get("games", []):
-            venue_name = game.get("venue", {}).get("name", "")
             home_team = game.get("teams", {}).get("home", {}).get("team", {}).get("name", "")
             away_team = game.get("teams", {}).get("away", {}).get("team", {}).get("name", "")
             if home_team:
-                team_location[home_team] = home_team  # home team is in their home city
+                team_location[home_team] = home_team
             if away_team:
-                team_location[away_team] = home_team  # away team is in the home team's city
+                team_location[away_team] = home_team
     return team_location
 
 

@@ -168,7 +168,7 @@ def get_todays_umpires(date_str: str | None = None) -> dict[str, dict]:
                 assignments[game_id] = hp_ump
 
     if not assignments:
-        logger.warning("umpire_collector: no umpire assignments for %s", date_str)
+        logger.info("umpire_collector: no umpire assignments posted yet for %s", date_str)
         return _TODAY_CACHE
 
     # Step 2: try to enrich with Covers historical O/U (best-effort, 8s cap)
