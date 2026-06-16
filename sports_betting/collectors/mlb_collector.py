@@ -40,30 +40,79 @@ def get_todays_games() -> list[dict]:
         return []
 
 
+_STANDINGS_URL = "https://statsapi.mlb.com/api/v1/standings"
+_STANDINGS_PARAMS = {
+    "leagueId": "103,104",
+    "season": datetime.now().year,
+    "standingsTypes": "regularSeason",
+    "hydrate": "team",
+}
+_STANDINGS_HEADERS = {"User-Agent": "Mozilla/5.0"}
+
+
 def get_team_standings() -> list[dict]:
-    """Get current MLB standings with win/loss records."""
+    """
+    Get current MLB standings with win/loss records.
+    Uses direct MLB Stats API (same as all other collectors) to avoid
+    statsapi library version/format issues.
+    """
     try:
-        standings = statsapi.standings_data(leagueId="103,104")
+        resp = requests.get(
+            _STANDINGS_URL,
+            params=_STANDINGS_PARAMS,
+            headers=_STANDINGS_HEADERS,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
         result = []
-        for div_id, div_data in standings.items():
-            for team in div_data["teams"]:
+        for record in data.get("records", []):
+            div_name = record.get("division", {}).get("nameShort", "")
+            for tr in record.get("teamRecords", []):
+                team = tr.get("team", {})
+                name = team.get("name", "").strip()
+                if not name:
+                    continue
                 result.append({
-                    "team_id": team["team_id"],
-                    "team_name": team["name"],
-                    "wins": team["w"],
-                    "losses": team["l"],
-                    "pct": float(team.get("pct") or 0),
-                    "gb": team["gb"],
-                    "streak": team.get("streak", ""),
-                    "last10": team.get("last10", ""),
-                    "home": team.get("home", ""),
-                    "away": team.get("away", ""),
-                    "division": div_data["div_name"],
+                    "team_id":   team.get("id"),
+                    "team_name": name,
+                    "wins":      tr.get("wins", 0),
+                    "losses":    tr.get("losses", 0),
+                    "pct":       float(tr.get("winningPercentage") or 0),
+                    "gb":        tr.get("gamesBack", "-"),
+                    "streak":    tr.get("streak", {}).get("streakCode", ""),
+                    "last10":    tr.get("records", {}).get("splitRecords", [{}])[0].get("pct", ""),
+                    "run_diff":  tr.get("runDifferential", 0),
+                    "division":  div_name,
                 })
+
+        logger.info("get_team_standings: loaded %d teams via direct MLB API", len(result))
         return result
     except Exception as e:
-        logger.error("Failed to fetch standings: %s", e)
-        return []
+        logger.error("get_team_standings (direct API) failed: %s — trying statsapi fallback", e)
+        # Fallback to statsapi library
+        try:
+            standings = statsapi.standings_data(leagueId="103,104")
+            result = []
+            for div_id, div_data in standings.items():
+                for team in div_data["teams"]:
+                    result.append({
+                        "team_id":   team["team_id"],
+                        "team_name": team["name"],
+                        "wins":      team["w"],
+                        "losses":    team["l"],
+                        "pct":       float(team.get("pct") or 0),
+                        "gb":        team["gb"],
+                        "streak":    team.get("streak", ""),
+                        "run_diff":  0,
+                        "division":  div_data["div_name"],
+                    })
+            logger.info("get_team_standings: fallback loaded %d teams via statsapi", len(result))
+            return result
+        except Exception as e2:
+            logger.error("get_team_standings: both methods failed: %s", e2)
+            return []
 
 
 def get_team_stats(team_id: int, season: int = None) -> dict:

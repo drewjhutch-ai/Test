@@ -145,7 +145,16 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
 
     team_id_map = get_team_id_map()
     standings = get_team_standings()
-    standings_by_name = {s["team_name"]: s for s in standings}
+
+    # Build exact-match AND last-word-match lookup so minor name variations don't break things
+    # e.g. "New York Yankees" matches "Yankees", "Los Angeles Dodgers" matches "Dodgers"
+    standings_by_name: dict[str, dict] = {}
+    for s in standings:
+        name = s["team_name"]
+        standings_by_name[name] = s
+        last_word = name.split()[-1]
+        if last_word not in standings_by_name:
+            standings_by_name[last_word] = s
 
     # Standings health-check — if this shows 0 teams, win% data is missing and all picks will SKIP
     if standings:
@@ -158,8 +167,7 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
     else:
         logger.warning(
             "STANDINGS EMPTY — win/loss records missing. "
-            "All true_prob values will be ~0.530 (HFA only) → all picks SKIP. "
-            "Check statsapi.standings_data() or MLB API."
+            "All true_prob values will be ~0.530 (HFA only) → all picks SKIP."
         )
 
     # All enrichment data fetched in parallel — keeps boot time under 60s.
