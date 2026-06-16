@@ -339,6 +339,21 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
             weather,
         )
 
+        # Diagnostic: log key values so we can see why games are being skipped
+        cps_h = (home_pitcher.siera + home_pitcher.era) / 2
+        cps_a = (away_pitcher.siera + away_pitcher.era) / 2
+        cps_gap_diag = abs(cps_h - cps_a)
+        h_total = max(1, home_profile.wins + home_profile.losses)
+        a_total = max(1, away_profile.wins + away_profile.losses)
+        logger.info(
+            "DIAG %s @ %s | backing=%s | true_prob=%.3f | CPS_gap=%.2f "
+            "| home_ERA=%.2f away_ERA=%.2f | rec=%d-%d vs %d-%d",
+            away, home, backing_team, true_prob, cps_gap_diag,
+            home_pitcher.era, away_pitcher.era,
+            home_profile.wins, home_profile.losses,
+            away_profile.wins, away_profile.losses,
+        )
+
         # Losing scenario
         losing_pct = 1 - true_prob
         losing_scenario = _write_losing_scenario(
@@ -435,9 +450,15 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
         )
 
         if pick.tier == "SKIP":
+            skip_detail = (
+                pick.skip_reason
+                or f"lose_pct={1 - true_prob:.2f} | CPS_gap={cps_gap_diag:.2f} | "
+                   f"ERA {home_pitcher.era:.2f} vs {away_pitcher.era:.2f}"
+            )
+            logger.info("SKIP %s @ %s: %s", away, home, skip_detail)
             skipped_games.append({
                 "game": f"{away} @ {home}",
-                "reason": pick.skip_reason or "Did not survive 12-layer filter",
+                "reason": skip_detail,
             })
         else:
             pick_candidates.append(pick)

@@ -13,12 +13,15 @@ from .park_database import get_park, is_dome, get_run_factor, wrigley_wind_signa
 logger = logging.getLogger(__name__)
 
 
-# Dynamic tier thresholds — updated by weight_trainer when 50+ graded picks exist
+# Dynamic tier thresholds — updated by weight_trainer when 50+ graded picks exist.
+# Calibrated for MLB: best statistical edges are at 53-65% true win probability.
+# True win prob = 1 - losing_pct. LEAN floor at 56% (~-130 implied) is selective
+# but achievable when pitcher gap + record edge + HFA stack up.
 _TIER_THRESHOLDS: dict = {
-    "STRONG": (0.00, 0.25),
-    "MEDIUM": (0.25, 0.32),
-    "LEAN":   (0.32, 0.40),
-    "SKIP":   (0.40, 1.00),
+    "STRONG": (0.00, 0.28),   # true_prob ≥ 0.72  (dominant edge)
+    "MEDIUM": (0.28, 0.36),   # true_prob ≥ 0.64  (strong edge)
+    "LEAN":   (0.36, 0.44),   # true_prob ≥ 0.56  (clear statistical edge)
+    "SKIP":   (0.44, 1.00),   # true_prob < 0.56  (too close to call)
 }
 
 # Learned factor weight multipliers — updated by daily_runner after load_learned_weights()
