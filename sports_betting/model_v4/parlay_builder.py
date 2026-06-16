@@ -101,26 +101,60 @@ class Parlay:
         return True
 
 
-def build_parlay(legs: list[ParlayLeg], template_key: str, force: bool = False) -> Parlay | None:
+def build_parlay(
+    legs: list[ParlayLeg],
+    template_key: str,
+    force: bool = False,
+    moonshot: bool = False,
+) -> Parlay | None:
     """
     Attempt to build a parlay from a list of eligible legs using the given template.
     force=True: always return a parlay using best available legs even if EV threshold not met.
+    moonshot=True: prefer run-line / riskier legs to maximise payout (P4/P5).
     """
     t = PARLAY_TEMPLATES[template_key]
     needed = t["legs"]
     max_lose = t["max_lose_pct"]
 
-    # With force mode, relax lose_pct filter so we always have enough legs
+    MOONSHOT_TAGS = {"run_line_moonshot", "nrfi_layer8_signal", "total_over_layer8_signal",
+                     "total_under_layer8_signal"}
+
     if force:
-        eligible = sorted(legs, key=lambda l: l.true_prob, reverse=True)
+        eligible = list(legs)
     else:
         eligible = [leg for leg in legs if leg.lose_pct <= max_lose and leg.true_prob >= (1 - max_lose)]
 
     if len(eligible) < needed:
         return None
 
-    eligible.sort(key=lambda l: l.true_prob, reverse=True)
-    chosen = eligible[:needed]
+    if moonshot:
+        # Sort: moonshot-tagged legs first, then by ascending true_prob (highest payout)
+        eligible.sort(key=lambda l: (
+            0 if any(tag in MOONSHOT_TAGS for tag in l.tags) else 1,
+            l.true_prob,
+        ))
+    else:
+        # Hit-rate mode: highest true_prob first, prefer non-moonshot legs
+        eligible.sort(key=lambda l: (
+            1 if any(tag in MOONSHOT_TAGS for tag in l.tags) else 0,
+            -l.true_prob,
+        ))
+
+    # Greedy selection: pick legs from sorted list ensuring game-uniqueness per parlay
+    # (same-game legs allowed only when they carry genuinely different market tags)
+    chosen: list[ParlayLeg] = []
+    game_market_seen: set[str] = set()
+    for leg in eligible:
+        key_gm = f"{leg.pick.game_id}_{leg.market}"
+        if key_gm in game_market_seen:
+            continue
+        chosen.append(leg)
+        game_market_seen.add(key_gm)
+        if len(chosen) == needed:
+            break
+
+    if len(chosen) < needed:
+        return None
 
     parlay = Parlay(
         label=f"{template_key} {t['label']} ({needed}-leg)",
@@ -149,14 +183,22 @@ def build_parlay(legs: list[ParlayLeg], template_key: str, force: bool = False) 
 
 def build_full_parlay_card(legs: list[ParlayLeg]) -> list[Parlay]:
     """
-    Build the full P1-P5 parlay card. Always returns all 5 parlays — first tries
-    to meet EV thresholds, falls back to force-building with best available legs.
+    Build the full P1-P5 parlay card.
+    P1-P3: optimise for hit rate (highest true_prob legs).
+    P4-P5: optimise for payout (moonshot / run-line legs preferred).
+    Always falls back to force-mode if EV threshold is not met.
     """
     parlays = []
-    for key in ["P1", "P2", "P3", "P4", "P5"]:
-        p = build_parlay(legs, key, force=False)
+    for key in ["P1", "P2", "P3"]:
+        p = build_parlay(legs, key, force=False, moonshot=False)
         if not p:
-            p = build_parlay(legs, key, force=True)
+            p = build_parlay(legs, key, force=True, moonshot=False)
+        if p:
+            parlays.append(p)
+    for key in ["P4", "P5"]:
+        p = build_parlay(legs, key, force=False, moonshot=True)
+        if not p:
+            p = build_parlay(legs, key, force=True, moonshot=True)
         if p:
             parlays.append(p)
     return parlays
@@ -182,8 +224,12 @@ def _decimal_to_american(dec: float) -> int:
 def picks_to_legs(picks: list[PickCandidate], prices: dict[str, int]) -> list[ParlayLeg]:
     """
     Convert analyzed PickCandidates to ParlayLegs.
-    Creates up to 3 legs per pick (ML, F5 ML, run line) so we always have
-    enough legs to build all 5 parlay sizes daily.
+
+    Primary leg always reflects the model's actual proposed_market.
+    Additional legs (F5, totals, NRFI, run line) are added only when layer 8
+    explicitly identified them as viable signals — never with hardcoded probability
+    bumps. Run-line legs are added for high-confidence picks to provide large-payout
+    options (P4/P5 moonshot parlays).
     """
     legs = []
     for pick in picks:
@@ -194,47 +240,127 @@ def picks_to_legs(picks: list[PickCandidate], prices: dict[str, int]) -> list[Pa
         if hr and not hr.parlay_eligible:
             continue
 
-        price = prices.get(pick.game_id, -120)  # -120 is more realistic MLB default
+        price = prices.get(pick.game_id, -120)
         true_prob = 1 - pick.losing_pct
+        market = (pick.proposed_market or "full_game_ml").lower()
 
-        # Primary leg — full game ML
+        # Determine primary description and market key from model's actual signal
+        if "f5" in market:
+            primary_market = "f5_ml"
+            primary_desc   = f"{pick.backing_team} F5 ML ({price:+d})"
+            primary_tags   = ["f5_model_signal"]
+        elif "nrfi" in market or ("under" in market and "f5" in market):
+            primary_market = "nrfi"
+            primary_desc   = f"{pick.backing_team} game NRFI/F5 Under ({price:+d})"
+            primary_tags   = ["nrfi_model_signal"]
+        elif "over" in market or "total" in market:
+            primary_market = "game_total_over"
+            primary_desc   = f"Game OVER ({price:+d})"
+            primary_tags   = ["total_model_signal"]
+        elif "under" in market or "total_under" in market:
+            primary_market = "game_total_under"
+            primary_desc   = f"Game UNDER ({price:+d})"
+            primary_tags   = ["total_model_signal"]
+        elif "run_line" in market or "rl" in market:
+            primary_market = "run_line_-1.5"
+            primary_desc   = f"{pick.backing_team} -1.5 RL ({price:+d})"
+            primary_tags   = ["rl_model_signal"]
+        else:
+            primary_market = "full_game_ml"
+            primary_desc   = f"{pick.backing_team} ML ({price:+d})"
+            primary_tags   = []
+
         legs.append(ParlayLeg(
             pick=pick,
-            market="full_game_ml",
+            market=primary_market,
             price=price,
             true_prob=true_prob,
             lose_pct=pick.losing_pct,
-            description=f"{pick.backing_team} ML ({price:+d})",
+            description=primary_desc,
+            tags=primary_tags,
         ))
 
-        # F5 ML — nearly identical to full game ML; typical difference is ±5 cents
-        f5_price = (price + 5) if price < 0 else (price - 5)
-        f5_prob = min(0.75, true_prob + 0.03)
-        legs.append(ParlayLeg(
-            pick=pick,
-            market="f5_ml",
-            price=f5_price,
-            true_prob=f5_prob,
-            lose_pct=1 - f5_prob,
-            description=f"{pick.backing_team} F5 ML ({f5_price:+d})",
-            tags=["f5_variant"],
-        ))
+        # Pull additional markets that layer 8 (bet-type) flagged as genuine signals
+        additional_markets: list[str] = []
+        for lo in pick.layer_outputs:
+            if lo.data.get("additional_markets"):
+                additional_markets = lo.data["additional_markets"]
+                break
 
-        # Run line (-1.5) — use decimal multiplier that matches real book pricing
-        # A -1.5 RL is worth ~1.15x the ML decimal for typical MLB favorites/dogs
-        if pick.tier in ("STRONG", "MEDIUM") and true_prob >= 0.58:
-            ml_dec = _ml_to_decimal(price)
-            rl_dec = ml_dec * 1.15
+        for extra in additional_markets:
+            extra_lower = extra.lower()
+
+            if "f5" in extra_lower and primary_market not in ("f5_ml",):
+                f5_price = (price + 5) if price < 0 else (price - 5)
+                # F5 prob is anchored to model's true_prob — no artificial boost
+                f5_prob  = min(true_prob, 0.74)
+                legs.append(ParlayLeg(
+                    pick=pick,
+                    market="f5_ml",
+                    price=f5_price,
+                    true_prob=f5_prob,
+                    lose_pct=1 - f5_prob,
+                    description=f"{pick.backing_team} F5 ML ({f5_price:+d})",
+                    tags=["f5_layer8_signal"],
+                ))
+
+            elif "nrfi" in extra_lower or ("under" in extra_lower and "f5" in extra_lower):
+                if primary_market != "nrfi":
+                    nrfi_price = -130
+                    nrfi_prob  = max(0.45, true_prob - 0.08)
+                    legs.append(ParlayLeg(
+                        pick=pick,
+                        market="nrfi",
+                        price=nrfi_price,
+                        true_prob=nrfi_prob,
+                        lose_pct=1 - nrfi_prob,
+                        description=f"NRFI / F5 Under ({nrfi_price:+d})",
+                        tags=["nrfi_layer8_signal"],
+                    ))
+
+            elif "over" in extra_lower and primary_market != "game_total_over":
+                over_price = -110
+                over_prob  = 0.50
+                legs.append(ParlayLeg(
+                    pick=pick,
+                    market="game_total_over",
+                    price=over_price,
+                    true_prob=over_prob,
+                    lose_pct=1 - over_prob,
+                    description=f"Game OVER ({over_price:+d})",
+                    tags=["total_over_layer8_signal"],
+                ))
+
+            elif "under" in extra_lower and primary_market != "game_total_under":
+                under_price = -110
+                under_prob  = 0.50
+                legs.append(ParlayLeg(
+                    pick=pick,
+                    market="game_total_under",
+                    price=under_price,
+                    true_prob=under_prob,
+                    lose_pct=1 - under_prob,
+                    description=f"Game UNDER ({under_price:+d})",
+                    tags=["total_under_layer8_signal"],
+                ))
+
+        # Run-line leg: added for STRONG picks only, using honest probability penalty.
+        # Intentionally riskier — these populate P4/P5 moonshot parlays.
+        if (pick.tier == "STRONG"
+                and true_prob >= 0.60
+                and primary_market not in ("run_line_-1.5",)):
+            ml_dec   = _ml_to_decimal(price)
+            rl_dec   = ml_dec * 1.15
             rl_price = _decimal_to_american(rl_dec)
-            rl_prob = max(0.42, true_prob - 0.12)
+            rl_prob  = max(0.40, true_prob - 0.15)  # honest 15-point penalty vs ML
             legs.append(ParlayLeg(
                 pick=pick,
                 market="run_line_-1.5",
                 price=rl_price,
                 true_prob=rl_prob,
                 lose_pct=1 - rl_prob,
-                description=f"{pick.backing_team} -1.5 RL ({rl_price:+d})",
-                tags=["run_line_variant"],
+                description=f"{pick.backing_team} -1.5 RL ({rl_price:+d}) [moonshot]",
+                tags=["run_line_moonshot"],
             ))
 
     return legs
