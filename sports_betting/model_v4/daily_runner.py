@@ -148,15 +148,15 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
     standings_by_name = {s["team_name"]: s for s in standings}
 
     # All enrichment data fetched in parallel — keeps boot time under 60s.
-    # Calls that hit external sites (FanGraphs/Savant/Covers/InsideThePen) use _timed()
-    # so a blocked URL never stalls the whole pipeline.
+    # Only calls that hit blocked external sites (Savant/Covers/InsideThePen) use _timed().
+    # MLB Stats API calls run directly — they work from cloud and need up to 20s for 500 pitchers.
     logger.info("Fetching all enrichment data in parallel...")
     with ThreadPoolExecutor(max_workers=20) as _pool:
-        _f_fg       = _pool.submit(_timed, get_pitcher_stats_fangraphs,   timeout=8,  default={})
-        _f_sc       = _pool.submit(_timed, get_statcast_pitcher_metrics,   timeout=8,  default={})
-        _f_vel_fg   = _pool.submit(_timed, get_pitcher_velocity_trends,    timeout=8,  default={})
-        _f_hr       = _pool.submit(_timed, get_pitcher_hr_vulnerability,   timeout=8,  default={})
-        _f_xwoba_lk = _pool.submit(_timed, get_team_xwoba_luck,           timeout=8,  default={})
+        _f_fg       = _pool.submit(get_pitcher_stats_fangraphs)       # MLB API — no timeout needed
+        _f_sc       = _pool.submit(get_statcast_pitcher_metrics)       # MLB API — no timeout needed
+        _f_vel_fg   = _pool.submit(_timed, get_pitcher_velocity_trends, timeout=8, default={})  # Savant — blocked
+        _f_hr       = _pool.submit(get_pitcher_hr_vulnerability)       # MLB API — no timeout needed
+        _f_xwoba_lk = _pool.submit(get_team_xwoba_luck)               # MLB API — no timeout needed
         _f_px       = _pool.submit(get_pitcher_xstats)
         _f_tx       = _pool.submit(get_team_xwoba)
         _f_vel      = _pool.submit(get_velocity_data)
