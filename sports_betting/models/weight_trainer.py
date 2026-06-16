@@ -181,10 +181,10 @@ def compute_dynamic_thresholds(graded_count: int) -> dict:
     Returns dict of {tier: (low, high)} losing_pct ranges.
     """
     defaults = {
-        "STRONG": (0.00, 0.25),
-        "MEDIUM": (0.25, 0.32),
-        "LEAN":   (0.32, 0.40),
-        "SKIP":   (0.40, 1.00),
+        "STRONG": (0.00, 0.28),
+        "MEDIUM": (0.28, 0.36),
+        "LEAN":   (0.36, 0.44),
+        "SKIP":   (0.44, 1.00),
     }
 
     if graded_count < FULL_SAMPLE:
@@ -203,23 +203,40 @@ def compute_dynamic_thresholds(graded_count: int) -> dict:
     if len(rows) < FULL_SAMPLE:
         return defaults
 
-    # Find the losing_pct cutoff where win rate drops to ~52% (breakeven vs -110)
-    # Sort by model probability
     rows = sorted(rows, key=lambda r: r["model_probability"], reverse=True)
     total = len(rows)
 
-    # Top 20%: STRONG candidates
-    strong_cut = max(0.60, rows[int(total * 0.20)]["model_probability"] if total > 5 else 0.75)
-    # Top 20-40%: MEDIUM
-    medium_cut = max(0.55, rows[int(total * 0.40)]["model_probability"] if total > 10 else 0.68)
-    # Top 40-60%: LEAN
-    lean_cut = max(0.50, rows[int(total * 0.60)]["model_probability"] if total > 20 else 0.60)
+    # Percentile cuts for tier boundaries
+    raw_strong = rows[int(total * 0.20)]["model_probability"] if total > 5 else 0.72
+    raw_medium = rows[int(total * 0.40)]["model_probability"] if total > 10 else 0.64
+    raw_lean   = rows[int(total * 0.60)]["model_probability"] if total > 20 else 0.56
+
+    # Enforce floor values so thresholds stay meaningful
+    strong_cut = max(0.65, min(raw_strong, 0.85))
+    medium_cut = max(0.58, min(raw_medium, strong_cut - 0.05))
+    lean_cut   = max(0.52, min(raw_lean,   medium_cut - 0.05))
+
+    s_lo = 0.00
+    s_hi = round(1 - strong_cut, 3)
+    m_lo = s_hi
+    m_hi = round(1 - medium_cut, 3)
+    l_lo = m_hi
+    l_hi = round(1 - lean_cut, 3)
+
+    # Safety: if any range collapsed (width < 0.04) fall back to defaults
+    widths = [s_hi - s_lo, m_hi - m_lo, l_hi - l_lo]
+    if any(w < 0.04 for w in widths):
+        logger.warning(
+            "compute_dynamic_thresholds: percentile collapse detected (widths=%s) — using defaults",
+            widths,
+        )
+        return defaults
 
     return {
-        "STRONG": (0.00, round(1 - strong_cut, 3)),
-        "MEDIUM": (round(1 - strong_cut, 3), round(1 - medium_cut, 3)),
-        "LEAN":   (round(1 - medium_cut, 3), round(1 - lean_cut, 3)),
-        "SKIP":   (round(1 - lean_cut, 3), 1.00),
+        "STRONG": (s_lo, s_hi),
+        "MEDIUM": (m_lo, m_hi),
+        "LEAN":   (l_lo, l_hi),
+        "SKIP":   (l_hi, 1.00),
     }
 
 
@@ -476,6 +493,50 @@ def _save_analysis_results(tier_accuracy: dict, context_patterns: dict) -> None:
             """, (f"context:{label}", stats["win_rate"], stats["sample"]))
 
 
+def _purge_corrupt_thresholds() -> None:
+    """
+    Delete any tier threshold rows where lo >= hi (degenerate/empty ranges).
+    Called at the top of run_full_retrain so corrupt values are cleared before
+    compute_dynamic_thresholds() writes fresh ones.
+    """
+    try:
+        with get_db() as conn:
+            rows = conn.execute(
+                "SELECT weight_key, weight_value FROM model_weights WHERE weight_key LIKE 'threshold:%'"
+            ).fetchall()
+
+        # Reconstruct threshold pairs from DB rows
+        tier_vals: dict[str, dict] = {}
+        for row in rows:
+            parts = row["weight_key"].split(":")
+            if len(parts) != 3:
+                continue
+            _, tier, bound = parts
+            if tier not in tier_vals:
+                tier_vals[tier] = {}
+            tier_vals[tier][bound] = row["weight_value"]
+
+        # Identify corrupt tiers
+        corrupt = [
+            tier for tier, bv in tier_vals.items()
+            if "lo" in bv and "hi" in bv and bv["lo"] >= bv["hi"]
+        ]
+
+        if corrupt:
+            with get_db() as conn:
+                for tier in corrupt:
+                    conn.execute(
+                        "DELETE FROM model_weights WHERE weight_key LIKE ?",
+                        (f"threshold:{tier}:%",),
+                    )
+            logger.warning("Purged corrupt tier thresholds from DB: %s", corrupt)
+        else:
+            logger.info("_purge_corrupt_thresholds: no corrupt thresholds found")
+
+    except Exception as e:
+        logger.warning("_purge_corrupt_thresholds failed (non-fatal): %s", e)
+
+
 def run_full_retrain() -> dict:
     """
     Main entry point. Runs full self-improvement cycle:
@@ -486,6 +547,8 @@ def run_full_retrain() -> dict:
     5. Save all to DB
     Returns summary dict.
     """
+    _purge_corrupt_thresholds()
+
     with get_db() as conn:
         count_row = conn.execute("""
             SELECT COUNT(*) as cnt FROM value_bets

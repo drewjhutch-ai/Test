@@ -40,9 +40,26 @@ def update_factor_weights(weights: dict) -> None:
 def update_tier_thresholds(thresholds: dict) -> None:
     """Called by daily_runner after loading learned weights."""
     global _TIER_THRESHOLDS
-    if thresholds:
-        _TIER_THRESHOLDS.update(thresholds)
-        logger.info("Tier thresholds updated from learned weights: %s", thresholds)
+    if not thresholds:
+        return
+
+    # Validate each range: lo must be strictly less than hi, width ≥ 0.04.
+    # Degenerate thresholds (lo == hi) produce empty tier ranges that swallow all picks.
+    for tier, val in thresholds.items():
+        try:
+            lo, hi = float(val[0]), float(val[1])
+        except (TypeError, IndexError, ValueError):
+            logger.warning("Corrupt tier threshold ignored (%s=%s) — keeping defaults", tier, val)
+            return
+        if lo >= hi or (hi - lo) < 0.04:
+            logger.warning(
+                "Degenerate tier threshold rejected (%s=(%s,%s) width=%.3f) — keeping defaults",
+                tier, lo, hi, hi - lo,
+            )
+            return
+
+    _TIER_THRESHOLDS.update(thresholds)
+    logger.info("Tier thresholds updated from learned weights: %s", thresholds)
 
 
 # ------------------------------------------------------------------ #
