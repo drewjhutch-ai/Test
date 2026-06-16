@@ -147,6 +147,21 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
     standings = get_team_standings()
     standings_by_name = {s["team_name"]: s for s in standings}
 
+    # Standings health-check — if this shows 0 teams, win% data is missing and all picks will SKIP
+    if standings:
+        sample = standings[:3]
+        logger.info(
+            "Standings loaded: %d teams. Sample: %s",
+            len(standings),
+            [(s["team_name"], s["wins"], s["losses"]) for s in sample],
+        )
+    else:
+        logger.warning(
+            "STANDINGS EMPTY — win/loss records missing. "
+            "All true_prob values will be ~0.530 (HFA only) → all picks SKIP. "
+            "Check statsapi.standings_data() or MLB API."
+        )
+
     # All enrichment data fetched in parallel — keeps boot time under 60s.
     # Only calls that hit blocked external sites (Savant/Covers/InsideThePen) use _timed().
     # MLB Stats API calls run directly — they work from cloud and need up to 20s for 500 pitchers.
@@ -195,7 +210,10 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
         t3_bat_speed_data  = _f_bat.result()
 
     all_signals = run_all_signals(games, standings_by_name, team_id_map)
-    logger.info("All enrichment data loaded.")
+    logger.info(
+        "All enrichment data loaded. fg_stats=%d pitchers | sc_stats=%d | xstats=%d",
+        len(fg_stats), len(sc_stats), len(t1_pitcher_xstats),
+    )
 
     # Pre-fetch team streaks and weather in parallel (avoids 30+ sequential MLB API calls)
     all_team_ids: set[tuple] = {
@@ -453,7 +471,8 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
             skip_detail = (
                 pick.skip_reason
                 or f"lose_pct={1 - true_prob:.2f} | CPS_gap={cps_gap_diag:.2f} | "
-                   f"ERA {home_pitcher.era:.2f} vs {away_pitcher.era:.2f}"
+                   f"ERA {home_pitcher.era:.2f} vs {away_pitcher.era:.2f} | "
+                   f"rec {home_profile.wins}-{home_profile.losses} vs {away_profile.wins}-{away_profile.losses}"
             )
             logger.info("SKIP %s @ %s: %s", away, home, skip_detail)
             skipped_games.append({
