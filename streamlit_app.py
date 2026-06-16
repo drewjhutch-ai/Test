@@ -1061,7 +1061,21 @@ def render_hr_parlay_tab(hr_results: dict):
     """)
 
 
-def render_skipped_tab(skipped: list):
+def render_skipped_tab(skipped: list, debug_info: dict | None = None):
+    # Diagnostic panel — always show so we can see why picks aren't coming through
+    if debug_info:
+        st.markdown("**🔍 Model Diagnostic (expand if no picks)**")
+        with st.expander("Data sources loaded this run", expanded=True):
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Standings teams", debug_info.get("standings_loaded", "?"))
+            col2.metric("Pitcher stats (fg)", debug_info.get("fg_stats_loaded", "?"))
+            col3.metric("Statcast proxies", debug_info.get("sc_stats_loaded", "?"))
+            st.caption(f"Games analyzed: {debug_info.get('games_analyzed', '?')}  |  Tier thresholds: {debug_info.get('tier_thresholds', '?')}")
+            if debug_info.get("standings_loaded", 0) == 0:
+                st.error("⚠️ STANDINGS EMPTY — no win/loss records loaded. All games will SKIP (only home-field-advantage probability ~53%). Check MLB API.")
+            elif debug_info.get("fg_stats_loaded", 0) == 0:
+                st.warning("⚠️ Pitcher stats empty — ERA/FIP defaults used. Picks may still generate from record edge alone.")
+
     if not skipped:
         st.success("No games skipped today.")
         return
@@ -2133,6 +2147,7 @@ def main():
     nrfi_parlay  = results.get("nrfi_parlay")
     nrfi_ranked  = results.get("nrfi_ranked", [])
     skipped      = results.get("skipped", [])
+    debug_info   = results.get("debug_info", {})
     sharp_plays  = results.get("sharp_plays", [])
     hr_results   = results.get("hr_results", {})
     all_signals  = results.get("all_signals", {})
@@ -2159,7 +2174,7 @@ def main():
     with tabs[2]: render_nrfi_tab(nrfi_ranked, nrfi_parlay)
     with tabs[3]: render_hr_parlay_tab(hr_results)
     with tabs[4]: render_intelligence_tab(all_signals, xwoba_luck, picks, sharp_plays)
-    with tabs[5]: render_skipped_tab(skipped)
+    with tabs[5]: render_skipped_tab(skipped, debug_info)
     with tabs[6]: render_signals_tab()
     with tabs[7]: render_record_bet_tab(picks, parlays, nrfi_ranked, hr_results)
     with tabs[8]: render_model_intelligence()

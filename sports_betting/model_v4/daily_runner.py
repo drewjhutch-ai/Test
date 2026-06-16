@@ -560,7 +560,20 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
         "xwoba_luck": xwoba_luck,
         "roi": roi,
         "learned_weights": learned_weights,
+        "debug_info": {
+            "standings_loaded": len(standings),
+            "fg_stats_loaded": len(fg_stats),
+            "sc_stats_loaded": len(sc_stats),
+            "games_analyzed": len(games),
+            "tier_thresholds": str(_tier_thresholds_snapshot()),
+        },
     }
+
+
+def _tier_thresholds_snapshot() -> dict:
+    """Return current tier thresholds for diagnostic display."""
+    from .layer_engine import _TIER_THRESHOLDS
+    return _TIER_THRESHOLDS
 
 
 # ------------------------------------------------------------------ #
