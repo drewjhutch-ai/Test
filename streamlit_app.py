@@ -749,8 +749,12 @@ def render_intelligence_tab(all_signals: dict, xwoba_luck: dict, games: list, sh
     # ── Rework scorecard: results tracked in isolation for this model version ──
     st.markdown(f"#### 🧪 Rework scorecard · `{MODEL_VERSION}`")
     st.caption("Tracked separately from any legacy picks. Judge the rework on CLV first — it's the leading indicator of edge; win/loss is noisy until ~200 graded bets.")
-    clv = get_clv_summary(model_version=MODEL_VERSION)
-    roi = get_model_roi(model_version=MODEL_VERSION)
+    try:
+        clv = get_clv_summary(model_version=MODEL_VERSION)
+        roi = get_model_roi(model_version=MODEL_VERSION)
+    except Exception as _e:
+        st.warning(f"Scorecard temporarily unavailable: {_e}")
+        clv, roi = {"count": 0, "avg_clv": 0}, {"graded": 0}
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Avg CLV", f"{clv.get('avg_clv', 0)*100:+.2f}%", help="No-vig closing prob minus the no-vig prob we bet at. Positive = beating the close.")
     c2.metric("Beat close", f"{clv.get('beat_close_pct', 0)*100:.0f}%" if clv.get("count") else "—")

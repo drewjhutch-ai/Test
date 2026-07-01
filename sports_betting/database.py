@@ -533,11 +533,12 @@ def record_model_pick(data: dict) -> bool:
             "away_team": data.get("away_team", "Unknown"),
         })
 
+        # game_id (mlb_<gamePk>) is unique per game, so no date filter is needed —
+        # this also avoids DATE()/date('now') which don't exist in PostgreSQL.
         existing = conn.execute("""
             SELECT id FROM value_bets
             WHERE game_id=? AND side=? AND market=?
             AND confidence='MODEL_PICK'
-            AND DATE(detected_at)=date('now')
         """, (data.get("game_id"), data.get("side"), data.get("market"))).fetchone()
         if existing:
             # Refresh the latest line as we approach first pitch (closing proxy).
@@ -547,7 +548,6 @@ def record_model_pick(data: dict) -> bool:
                     UPDATE value_bets SET closing_price=?
                     WHERE game_id=? AND side=? AND market=?
                     AND confidence='MODEL_PICK'
-                    AND DATE(detected_at)=date('now')
                 """, (data.get("book_price"), data.get("game_id"),
                       data.get("side"), data.get("market")))
             return False
@@ -593,7 +593,6 @@ def update_pick_closing(game_id: str, side: str, market: str,
             SET closing_price=?
             WHERE game_id=? AND side=? AND market=?
             AND confidence='MODEL_PICK'
-            AND DATE(detected_at)=date('now')
         """, (closing_price, game_id, side, market))
 
 
@@ -605,13 +604,16 @@ def get_clv_summary(days: int = 30, model_version: str | None = None) -> dict:
 
     Pass model_version to isolate a single model's results (e.g. this rework).
     """
+    # Compute the cutoff in Python (cross-dialect; datetime('now', ?) with a bound
+    # param is NOT translated for PostgreSQL and raises UndefinedFunction there).
+    cutoff = (_dt.now(timezone.utc) - timedelta(days=int(days))).isoformat()
     where = [
         "confidence='MODEL_PICK'",
         "closing_price IS NOT NULL",
         "book_price IS NOT NULL",
-        "detected_at >= datetime('now', ?)",
+        "detected_at >= ?",
     ]
-    params: list = [f"-{int(days)} days"]
+    params: list = [cutoff]
     if model_version:
         where.append("model_version=?")
         params.append(model_version)
@@ -661,9 +663,10 @@ def get_model_roi(days: int = 3650, model_version: str | None = None) -> dict:
     version. The legacy compute_roi_summary() only counts confidence='PLACED'
     rows and never saw model picks — this is the rework's own scoreboard.
     """
+    cutoff = (_dt.now(timezone.utc) - timedelta(days=int(days))).isoformat()
     where = ["confidence='MODEL_PICK'", "result IN ('WIN','LOSS')",
-             "detected_at >= datetime('now', ?)"]
-    params: list = [f"-{int(days)} days"]
+             "detected_at >= ?"]
+    params: list = [cutoff]
     if model_version:
         where.append("model_version=?")
         params.append(model_version)
