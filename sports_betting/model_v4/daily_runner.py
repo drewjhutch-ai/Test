@@ -37,7 +37,7 @@ from .layer_engine import (
 from ..models.outcome_grader import grade_all_pending
 from ..models.weight_trainer import run_full_retrain, load_learned_weights
 from .parlay_builder import picks_to_legs, build_full_parlay_card
-from .market_model import assess_bet, EDGE_CUSHION
+from .market_model import assess_bet, EDGE_CUSHION, MODEL_VERSION
 from .nrfi_yrfi import NrfiProfile, rank_games_for_nrfi_parlay, build_nrfi_parlay
 from .pick_card import render_pick_card
 from ..collectors.hr_props_collector import run_hr_parlay_analysis
@@ -581,6 +581,7 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
                 "recommended_bet":     round(mkt.get("kelly", 0) * 100, 2),
                 "market_novig_prob":   mkt.get("p_market_novig"),
                 "factors":             _json.dumps(list(p.factors or [])),
+                "model_version":       MODEL_VERSION,
             })
         except Exception as e:
             logger.warning("record_model_pick failed for %s: %s", p.game_id, e)
@@ -634,6 +635,8 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
         "xwoba_luck": xwoba_luck,
         "roi": roi,
         "clv": _safe_clv_summary(),
+        "model_version": MODEL_VERSION,
+        "rework_performance": _safe_rework_performance(),
         "learned_weights": learned_weights,
         "debug_info": {
             "standings_loaded": len(standings),
@@ -641,6 +644,7 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
             "sc_stats_loaded": len(sc_stats),
             "games_analyzed": len(games),
             "picks_qualified": len(pick_candidates),
+            "model_version": MODEL_VERSION,
             "tier_thresholds": str(_tier_thresholds_snapshot()),
         },
     }
@@ -653,13 +657,23 @@ def _tier_thresholds_snapshot() -> dict:
 
 
 def _safe_clv_summary() -> dict:
-    """Closing-line-value summary; never raises (CLV is informational)."""
+    """CLV summary scoped to THIS reworked model; never raises."""
     try:
         from ..database import get_clv_summary
-        return get_clv_summary()
+        return get_clv_summary(model_version=MODEL_VERSION)
     except Exception as e:
         logger.warning("CLV summary failed: %s", e)
         return {"avg_clv": 0.0, "count": 0, "assessment": "CLV unavailable.", "is_sharp": False}
+
+
+def _safe_rework_performance() -> dict:
+    """ROI/hit-rate scoped to THIS reworked model's picks only; never raises."""
+    try:
+        from ..database import get_model_roi
+        return get_model_roi(model_version=MODEL_VERSION)
+    except Exception as e:
+        logger.warning("Rework ROI summary failed: %s", e)
+        return {"model_version": MODEL_VERSION, "graded": 0, "status": "unavailable"}
 
 
 # ------------------------------------------------------------------ #

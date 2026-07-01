@@ -23,6 +23,11 @@ Everything here is pure math with no I/O so it is trivially unit-testable.
 from __future__ import annotations
 import math
 
+# Version tag stamped on every pick this reworked model produces, so its results
+# (CLV / ROI) can be evaluated in isolation from any legacy or future picks.
+# Bump this string whenever the pick-generation logic changes materially.
+MODEL_VERSION = "2026.06-market-anchor"
+
 # ── Tunable constants ────────────────────────────────────────────────
 # How much weight the model's own estimate gets when blended with the
 # market. The market gets (1 - MODEL_WEIGHT). Retail models rarely justify

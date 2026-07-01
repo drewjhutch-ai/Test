@@ -740,18 +740,29 @@ def render_nrfi_tab(nrfi_ranked: list, nrfi_parlay: dict | None = None):
 
 def render_intelligence_tab(all_signals: dict, xwoba_luck: dict, games: list, sharp_plays: list = None):
     """Signal 📡 Intelligence — all 13 signals summarized per game."""
-    from sports_betting.signals.clv_tracker import get_clv_summary
+    from sports_betting.database import get_clv_summary, get_model_roi
+    from sports_betting.model_v4.market_model import MODEL_VERSION
 
     st.markdown("### 📡 Model Intelligence Dashboard")
     st.caption("All 13 advanced signals running on today's slate. These feed directly into pick factor counts.")
 
-    # CLV summary at top
-    clv = get_clv_summary()
-    if clv["count"] > 0:
+    # ── Rework scorecard: results tracked in isolation for this model version ──
+    st.markdown(f"#### 🧪 Rework scorecard · `{MODEL_VERSION}`")
+    st.caption("Tracked separately from any legacy picks. Judge the rework on CLV first — it's the leading indicator of edge; win/loss is noisy until ~200 graded bets.")
+    clv = get_clv_summary(model_version=MODEL_VERSION)
+    roi = get_model_roi(model_version=MODEL_VERSION)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Avg CLV", f"{clv.get('avg_clv', 0)*100:+.2f}%", help="No-vig closing prob minus the no-vig prob we bet at. Positive = beating the close.")
+    c2.metric("Beat close", f"{clv.get('beat_close_pct', 0)*100:.0f}%" if clv.get("count") else "—")
+    c3.metric("Graded picks", roi.get("graded", 0))
+    c4.metric("ROI", f"{roi.get('roi_pct', 0):+.1f}%" if roi.get("graded") else "—",
+              help=f"Record: {roi.get('wins', 0)}-{roi.get('losses', 0)} · hit rate {roi.get('hit_rate', 0)*100:.0f}%" if roi.get("graded") else "Builds as picks are graded.")
+    if clv.get("count", 0) > 0:
         color = "green" if clv["is_sharp"] else "orange"
-        st.markdown(f"**Closing Line Value (CLV):** :{color}[{clv['assessment']}]")
+        st.markdown(f"**CLV read:** :{color}[{clv['assessment']}]")
     else:
-        st.info("📈 CLV tracking starts as soon as you record your first bet and games complete. It will tell you if the model is genuinely sharp over time.")
+        st.info("📈 CLV/ROI populate as this rework's picks are graded and games complete. Give it a few weeks before judging.")
+    st.markdown("---")
 
     if not all_signals:
         st.info("Signal data will appear after the model runs. Press Run Model.")

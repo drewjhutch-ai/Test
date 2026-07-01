@@ -432,6 +432,7 @@ def _migrate_value_bets_columns():
         ("closing_price", "REAL"),
         ("market_novig_prob", "REAL"),
         ("clv", "REAL"),
+        ("model_version", "TEXT"),
     ]
     for name, sqltype in cols:
         try:
@@ -555,10 +556,10 @@ def record_model_pick(data: dict) -> bool:
             INSERT INTO value_bets
             (game_id, book, market, side, book_price, model_probability,
              implied_probability, edge, kelly_fraction, recommended_bet,
-             confidence, factors, market_novig_prob)
+             confidence, factors, market_novig_prob, model_version)
             VALUES (:game_id, :book, :market, :side, :book_price, :model_probability,
                     :implied_probability, :edge, :kelly_fraction, :recommended_bet,
-                    'MODEL_PICK', :factors, :market_novig_prob)
+                    'MODEL_PICK', :factors, :market_novig_prob, :model_version)
         """, {
             "game_id":             data.get("game_id"),
             "book":                data.get("book", "model"),
@@ -572,6 +573,7 @@ def record_model_pick(data: dict) -> bool:
             "recommended_bet":     data.get("recommended_bet"),
             "factors":             data.get("factors"),
             "market_novig_prob":   data.get("market_novig_prob"),
+            "model_version":       data.get("model_version"),
         })
     return True
 
@@ -595,21 +597,31 @@ def update_pick_closing(game_id: str, side: str, market: str,
         """, (closing_price, game_id, side, market))
 
 
-def get_clv_summary(days: int = 30) -> dict:
+def get_clv_summary(days: int = 30, model_version: str | None = None) -> dict:
     """
     Average closing-line value across graded model picks. CLV here = the no-vig
     closing probability minus the no-vig probability we bet at (positive = we
     consistently beat the closing line, the #1 predictor of long-term edge).
+
+    Pass model_version to isolate a single model's results (e.g. this rework).
     """
+    where = [
+        "confidence='MODEL_PICK'",
+        "closing_price IS NOT NULL",
+        "book_price IS NOT NULL",
+        "detected_at >= datetime('now', ?)",
+    ]
+    params: list = [f"-{int(days)} days"]
+    if model_version:
+        where.append("model_version=?")
+        params.append(model_version)
+
     with get_db() as conn:
-        rows = conn.execute("""
-            SELECT book_price, closing_price, market_novig_prob
-            FROM value_bets
-            WHERE confidence='MODEL_PICK'
-            AND closing_price IS NOT NULL
-            AND book_price IS NOT NULL
-            AND detected_at >= datetime('now', ?)
-        """, (f"-{int(days)} days",)).fetchall()
+        rows = conn.execute(
+            "SELECT book_price, closing_price, market_novig_prob FROM value_bets "
+            "WHERE " + " AND ".join(where),
+            tuple(params),
+        ).fetchall()
 
     def implied(price):
         price = float(price)
@@ -640,6 +652,50 @@ def get_clv_summary(days: int = 30) -> dict:
             else "Losing to the close — model is on the wrong side."
         ),
         "is_sharp": avg > 0.01 and beat > 0.5,
+    }
+
+
+def get_model_roi(days: int = 3650, model_version: str | None = None) -> dict:
+    """
+    ROI / hit-rate on graded MODEL_PICK bets, optionally isolated to one model
+    version. The legacy compute_roi_summary() only counts confidence='PLACED'
+    rows and never saw model picks — this is the rework's own scoreboard.
+    """
+    where = ["confidence='MODEL_PICK'", "result IN ('WIN','LOSS')",
+             "detected_at >= datetime('now', ?)"]
+    params: list = [f"-{int(days)} days"]
+    if model_version:
+        where.append("model_version=?")
+        params.append(model_version)
+
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n, "
+            "SUM(CASE WHEN result='WIN' THEN 1 ELSE 0 END) AS wins, "
+            "SUM(CASE WHEN result='LOSS' THEN 1 ELSE 0 END) AS losses, "
+            "SUM(recommended_bet) AS staked, SUM(profit_loss) AS profit, "
+            "AVG(edge) AS avg_edge "
+            "FROM value_bets WHERE " + " AND ".join(where),
+            tuple(params),
+        ).fetchone()
+
+    r = dict(row) if row else {}
+    n = r.get("n") or 0
+    if not n:
+        return {"model_version": model_version, "graded": 0,
+                "status": "no_graded_picks_yet"}
+    staked = r.get("staked") or 0
+    profit = r.get("profit") or 0
+    return {
+        "model_version": model_version,
+        "graded": n,
+        "wins": r.get("wins") or 0,
+        "losses": r.get("losses") or 0,
+        "hit_rate": round((r.get("wins") or 0) / n, 4),
+        "roi_pct": round((profit / staked * 100), 2) if staked else 0.0,
+        "avg_edge": round(r.get("avg_edge") or 0, 4),
+        "units_staked": round(staked, 2),
+        "units_profit": round(profit, 2),
     }
 
 
