@@ -266,11 +266,14 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
     nrfi_profiles: list[NrfiProfile] = []
     prices_map: dict[str, int] = {}
 
-    # Build odds lookup
-    odds_by_teams: dict[tuple, dict] = {
-        (pg.get("home_team"), pg.get("away_team")): pg
-        for pg in parsed_games
-    }
+    # Build odds lookup keyed by BOTH the full team-name tuple and a normalised
+    # (last-word, lowercased) tuple, so ESPN's names ("Athletics") still match the
+    # MLB schedule's names ("Oakland Athletics").
+    odds_by_teams: dict[tuple, dict] = {}
+    for pg in parsed_games:
+        h, a = pg.get("home_team"), pg.get("away_team")
+        odds_by_teams[(h, a)] = pg
+        odds_by_teams[(_norm_team(h), _norm_team(a))] = pg
 
     for game in games:
         home = game["home_team"]
@@ -308,11 +311,14 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
 
         # Odds from parsed games. We need REAL two-way prices to anchor to the
         # market — without them we cannot compute a fair line or an edge, so the
-        # game is unbettable (flagged and skipped below).
-        odds_entry = odds_by_teams.get((home, away), {})
-        dk_h2h = odds_entry.get("odds_by_book", {}).get("draftkings", {}).get("h2h", {})
-        raw_home_price = dk_h2h.get("home_price")
-        raw_away_price = dk_h2h.get("away_price")
+        # game is unbettable (flagged and skipped below). Use the best available
+        # book (NOT hard-coded DraftKings — ESPN usually supplies "ESPN BET").
+        odds_entry = (odds_by_teams.get((home, away))
+                      or odds_by_teams.get((_norm_team(home), _norm_team(away)))
+                      or {})
+        h2h = _best_h2h(odds_entry)
+        raw_home_price = h2h.get("home_price")
+        raw_away_price = h2h.get("away_price")
         has_market = raw_home_price is not None and raw_away_price is not None
         home_price = raw_home_price if raw_home_price is not None else -120
         away_price = raw_away_price if raw_away_price is not None else +105
@@ -679,6 +685,41 @@ def _safe_rework_performance() -> dict:
 # ------------------------------------------------------------------ #
 #  Helpers                                                            #
 # ------------------------------------------------------------------ #
+
+# Preferred books in order — sharpest first. We fall back to ANY book that
+# carries a valid two-way moneyline so the model isn't hostage to one provider.
+_BOOK_PRIORITY = [
+    "pinnacle", "draftkings", "fanduel", "betmgm", "williamhill_us",
+    "caesars", "espn_bet", "espnbet", "espn", "betrivers", "pointsbet",
+]
+
+
+def _norm_team(name: str | None) -> str:
+    """Last word of a team name, lowercased — robust to source name variants."""
+    if not name:
+        return ""
+    return name.split()[-1].lower()
+
+
+def _best_h2h(odds_entry: dict) -> dict:
+    """
+    Return the best available two-way moneyline (home_price + away_price both
+    present) from an odds entry, trying sharp books first and then any book.
+    Returns {} if no book carries a complete h2h market.
+    """
+    books = (odds_entry or {}).get("odds_by_book", {})
+    for key in _BOOK_PRIORITY:
+        h2h = books.get(key, {}).get("h2h", {}) if isinstance(books.get(key), dict) else {}
+        if h2h.get("home_price") is not None and h2h.get("away_price") is not None:
+            return h2h
+    for book in books.values():
+        if not isinstance(book, dict):
+            continue
+        h2h = book.get("h2h", {})
+        if h2h.get("home_price") is not None and h2h.get("away_price") is not None:
+            return h2h
+    return {}
+
 
 def _classify_wind_direction(weather_raw: dict) -> str:
     deg = weather_raw.get("wind_direction", 0)
