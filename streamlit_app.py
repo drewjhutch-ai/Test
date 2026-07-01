@@ -576,23 +576,22 @@ def render_parlays_tab(parlays: list, nrfi_parlay: dict | None):
         st.info("No picks available to build parlays — run the model first.")
         return
 
-    parlay_meta = [
-        ("P1 — Anchor",   "🥇", "$35–$40", "#f59e0b"),
-        ("P2 — Core",     "🥈", "$15–$20", "#94a3b8"),
-        ("P3 — Science",  "🥉", "$10–$15", "#cd7c3a"),
-        ("P4 — Push",     "🎯", "$5–$10",  "#3b82f6"),
-        ("P5 — Moonshot", "🌙", "$5",      "#8b5cf6"),
-    ]
+    parlay_icons = ["🥇", "🥈", "🥉", "🎯", "🌙", "🎰"]
+    parlay_accents = ["#f59e0b", "#94a3b8", "#cd7c3a", "#3b82f6", "#8b5cf6", "#64748b"]
 
     for i, parlay in enumerate(parlays):
         parlay.compute()
-        label, icon, stake, accent = parlay_meta[i] if i < len(parlay_meta) else (f"Parlay {i+1}", "🎰", "$5", "#64748b")
-        star   = "⭐ " if parlay.ev_pct >= 0.10 and not parlay.below_threshold else ""
-        warn   = "⚠️ best-available legs" if parlay.below_threshold else ""
+        # Use the parlay's own (dynamic) label and stake — nothing is forced now,
+        # so every shown parlay is a genuine +EV combination.
+        label  = parlay.label
+        icon   = parlay_icons[i] if i < len(parlay_icons) else "🎰"
+        accent = parlay_accents[i] if i < len(parlay_accents) else "#64748b"
+        stake  = f"${parlay.stake_low}–${parlay.stake_high}"
+        star   = "⭐ " if parlay.ev_pct >= 0.10 else ""
         ev_col = "#10b981" if parlay.ev_pct >= 0 else "#ef4444"
         legs_n = len(parlay.legs)
 
-        warn_str = f' · {warn}' if warn else ''
+        warn_str = ""
         st.html(f"""
         <div style="background:#111827;border:1px solid #1e293b;border-top:2px solid {accent};border-radius:12px;padding:20px 24px;margin-bottom:14px">
             <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:14px">

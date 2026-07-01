@@ -17,8 +17,17 @@ from ..database import get_db
 
 logger = logging.getLogger(__name__)
 
-MIN_SAMPLE = 20   # Minimum graded bets before adjusting any weight
-FULL_SAMPLE = 50  # Preferred minimum for threshold adjustment
+# Sample-size gates. Raised sharply per the research: online weight updates on
+# small recent samples chase variance ("the past may not be representative"),
+# which is exactly what corrupted the tier thresholds and zeroed out picks.
+# Betting literature puts the minimum to distinguish edge from luck at ~200 bets
+# (300-500 to trust). Until then the model runs on sane fixed defaults.
+MIN_SAMPLE = 50    # Minimum graded bets before adjusting any factor weight
+FULL_SAMPLE = 200  # Minimum before touching tier thresholds at all
+
+# Shrinkage applied to learned factor multipliers — pulls every multiplier toward
+# 1.0 (neutral) so a noisy small sample can't swing the model hard.
+FACTOR_SHRINKAGE = 0.5
 
 
 def analyze_factor_performance() -> dict[str, dict]:
@@ -72,6 +81,8 @@ def analyze_factor_performance() -> dict[str, dict]:
             multiplier = max(0.5, 1.0 - (0.55 - win_rate) * 5)
         else:
             multiplier = 1.0
+        # Shrink toward neutral so a small/noisy sample can't swing the model.
+        multiplier = round(1.0 + (multiplier - 1.0) * FACTOR_SHRINKAGE, 3)
         results[kw] = {
             "wins": stats["wins"],
             "losses": stats["losses"],

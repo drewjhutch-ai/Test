@@ -37,6 +37,7 @@ from .layer_engine import (
 from ..models.outcome_grader import grade_all_pending
 from ..models.weight_trainer import run_full_retrain, load_learned_weights
 from .parlay_builder import picks_to_legs, build_full_parlay_card
+from .market_model import assess_bet, EDGE_CUSHION
 from .nrfi_yrfi import NrfiProfile, rank_games_for_nrfi_parlay, build_nrfi_parlay
 from .pick_card import render_pick_card
 from ..collectors.hr_props_collector import run_hr_parlay_analysis
@@ -305,11 +306,16 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
         home_profile = _build_team_profile(home, home_stand, home_streak_raw)
         away_profile = _build_team_profile(away, away_stand, away_streak_raw)
 
-        # Odds from parsed games
+        # Odds from parsed games. We need REAL two-way prices to anchor to the
+        # market — without them we cannot compute a fair line or an edge, so the
+        # game is unbettable (flagged and skipped below).
         odds_entry = odds_by_teams.get((home, away), {})
         dk_h2h = odds_entry.get("odds_by_book", {}).get("draftkings", {}).get("h2h", {})
-        home_price = dk_h2h.get("home_price", -120)
-        away_price = dk_h2h.get("away_price", +105)
+        raw_home_price = dk_h2h.get("home_price")
+        raw_away_price = dk_h2h.get("away_price")
+        has_market = raw_home_price is not None and raw_away_price is not None
+        home_price = raw_home_price if raw_home_price is not None else -120
+        away_price = raw_away_price if raw_away_price is not None else +105
 
         # Determine which side to analyze
         # Priority: backing team is the better pitcher's team
@@ -357,13 +363,24 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
             backing_team = home
             backing_price = home_price
 
-        # Estimate true probability from model
-        true_prob = _estimate_true_probability(
+        # Estimate the MODEL-ONLY probability (the prior)...
+        model_prob = _estimate_true_probability(
             backing_team, home, away,
             home_pitcher, away_pitcher,
             home_profile, away_profile,
             weather,
         )
+
+        # ...then anchor it to the market. The blended fair probability — not the
+        # raw model number — is what flows through the rest of the pipeline.
+        market = assess_bet(
+            p_model=model_prob,
+            backing_price=backing_price,
+            home_price=home_price,
+            away_price=away_price,
+            backing_is_home=(backing_team == home),
+        )
+        true_prob = market["p_blend"] if has_market else model_prob
 
         # Diagnostic: log key values so we can see why games are being skipped
         cps_h = (home_pitcher.siera + home_pitcher.era) / 2
@@ -372,12 +389,15 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
         h_total = max(1, home_profile.wins + home_profile.losses)
         a_total = max(1, away_profile.wins + away_profile.losses)
         logger.info(
-            "DIAG %s @ %s | backing=%s | true_prob=%.3f | CPS_gap=%.2f "
-            "| home_ERA=%.2f away_ERA=%.2f | rec=%d-%d vs %d-%d",
-            away, home, backing_team, true_prob, cps_gap_diag,
+            "DIAG %s @ %s | backing=%s | model=%.3f mkt_fair=%.3f blend=%.3f "
+            "| edge_mkt=%+.3f edge_price=%+.3f qual=%s | CPS_gap=%.2f "
+            "| ERA %.2f vs %.2f | rec=%d-%d vs %d-%d | has_mkt=%s",
+            away, home, backing_team, model_prob, market["p_market_novig"],
+            true_prob, market["edge_market"], market["edge_price"],
+            market["qualifies"], cps_gap_diag,
             home_pitcher.era, away_pitcher.era,
             home_profile.wins, home_profile.losses,
-            away_profile.wins, away_profile.losses,
+            away_profile.wins, away_profile.losses, has_market,
         )
 
         # Losing scenario
@@ -429,6 +449,11 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
             backing_team=backing_team,
             proposed_market="full_game_ml",
         )
+        # Attach market anchoring so downstream (gate, sizing, CLV, parlays,
+        # display) can use the fair line, blended prob, edge and Kelly stake.
+        pick.market = market
+        pick.has_market = has_market
+        pick.backing_price = backing_price
 
         # Note TBD games but still analyze with available data
         if home_sp_name in ("TBD", "") or away_sp_name in ("TBD", ""):
@@ -475,6 +500,24 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
             confirmed_factors=confirmed_factors,
         )
 
+        # ── MARKET EDGE GATE (quality over quantity) ─────────────────
+        # The decisive filter: we only bet when the blended fair probability
+        # beats the market's fair line by the cushion AND the price is +EV.
+        # This is where the ROI lives; it also means some days produce zero
+        # picks, which is correct — we do not force a card.
+        if pick.tier != "SKIP":
+            if not has_market:
+                pick.tier = "SKIP"
+                pick.skip_reason = "No real two-way market odds — cannot price an edge."
+            elif not market["qualifies"]:
+                pick.tier = "SKIP"
+                pick.skip_reason = (
+                    f"No edge vs market: fair {market['p_market_novig']:.1%} "
+                    f"vs blended {market['p_blend']:.1%} "
+                    f"(edge {market['edge_market']:+.1%}, need +{int(EDGE_CUSHION*100)}%; "
+                    f"price edge {market['edge_price']:+.1%})"
+                )
+
         if pick.tier == "SKIP":
             skip_detail = (
                 pick.skip_reason
@@ -510,6 +553,37 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
             p.skip_reason = "; ".join(
                 v.reason for v in p.hard_rules_result.violations
             )
+
+    # ── Persist qualifying picks so grading / ROI / CLV / learning actually
+    #    run on the picks the user sees (previously this link was missing). ──
+    import json as _json
+    from ..database import record_model_pick
+    from .market_model import american_to_implied
+    for p in pick_candidates:
+        if p.tier == "SKIP":
+            continue
+        mkt = getattr(p, "market", None) or {}
+        price = getattr(p, "backing_price", None)
+        if price is None:
+            continue
+        try:
+            record_model_pick({
+                "game_id":             p.game_id,
+                "home_team":           p.home_team,
+                "away_team":           p.away_team,
+                "side":                p.backing_team,
+                "market":              p.proposed_market or "full_game_ml",
+                "book_price":          price,
+                "model_probability":   mkt.get("p_blend", 1 - p.losing_pct),
+                "implied_probability": round(american_to_implied(price), 4),
+                "edge":                mkt.get("edge_price", 0),
+                "kelly_fraction":      mkt.get("kelly", 0),
+                "recommended_bet":     round(mkt.get("kelly", 0) * 100, 2),
+                "market_novig_prob":   mkt.get("p_market_novig"),
+                "factors":             _json.dumps(list(p.factors or [])),
+            })
+        except Exception as e:
+            logger.warning("record_model_pick failed for %s: %s", p.game_id, e)
 
     # NRFI ranking
     nrfi_ranked = rank_games_for_nrfi_parlay(nrfi_profiles)
@@ -559,12 +633,14 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
         "all_signals": all_signals,
         "xwoba_luck": xwoba_luck,
         "roi": roi,
+        "clv": _safe_clv_summary(),
         "learned_weights": learned_weights,
         "debug_info": {
             "standings_loaded": len(standings),
             "fg_stats_loaded": len(fg_stats),
             "sc_stats_loaded": len(sc_stats),
             "games_analyzed": len(games),
+            "picks_qualified": len(pick_candidates),
             "tier_thresholds": str(_tier_thresholds_snapshot()),
         },
     }
@@ -574,6 +650,16 @@ def _tier_thresholds_snapshot() -> dict:
     """Return current tier thresholds for diagnostic display."""
     from .layer_engine import _TIER_THRESHOLDS
     return _TIER_THRESHOLDS
+
+
+def _safe_clv_summary() -> dict:
+    """Closing-line-value summary; never raises (CLV is informational)."""
+    try:
+        from ..database import get_clv_summary
+        return get_clv_summary()
+    except Exception as e:
+        logger.warning("CLV summary failed: %s", e)
+        return {"avg_clv": 0.0, "count": 0, "assessment": "CLV unavailable.", "is_sharp": False}
 
 
 # ------------------------------------------------------------------ #
@@ -687,36 +773,52 @@ def _estimate_true_probability(
     home_t: TeamProfile, away_t: TeamProfile,
     weather: WeatherProfile,
 ) -> float:
+    """
+    MODEL-ONLY win probability for the backing side.
+
+    Reweighted per the research: in a single MLB game the STARTING PITCHER is the
+    biggest lever, so the pitcher gap now dominates. Team W-L record — noisy,
+    heavily regressing, and already priced into the line — is demoted from 0.40
+    to 0.15. Home-field advantage is capped small (modern MLB HFA ≈ 53-54%).
+
+    This is the model's *prior*. It is deliberately NOT the number we bet on —
+    the caller blends it toward the no-vig market probability (see market_model)
+    before any pick is made.
+    """
     import math
     score = 0.0
 
-    # Pitcher edge
+    # Pitcher edge — now the dominant term. CPS is on an ERA-like scale (lower is
+    # better); a full-run gap is a large edge.
     home_cps = (home_p.siera + home_p.era) / 2
     away_cps = (away_p.siera + away_p.era) / 2
     if backing == home:
-        score += (away_cps - home_cps) * 0.18
+        score += (away_cps - home_cps) * 0.30
     else:
-        score += (home_cps - away_cps) * 0.18
+        score += (home_cps - away_cps) * 0.30
 
-    # Win% edge
+    # Win% edge — demoted. Record is largely already in the market line.
     home_total = max(1, home_t.wins + home_t.losses)
     away_total = max(1, away_t.wins + away_t.losses)
     home_wpct = home_t.wins / home_total
     away_wpct = away_t.wins / away_total
     if backing == home:
-        score += (home_wpct - away_wpct) * 0.40
-        score += 0.04  # HFA
+        score += (home_wpct - away_wpct) * 0.15
+        score += 0.035  # HFA (~53-54% home win rate)
     else:
-        score += (away_wpct - home_wpct) * 0.40
+        score += (away_wpct - home_wpct) * 0.15
 
-    # Streak
+    # Streak / momentum — kept tiny.
     if backing == home:
-        score += home_t.momentum * 0.01
+        score += home_t.momentum * 0.005
     else:
-        score += away_t.momentum * 0.01
+        score += away_t.momentum * 0.005
 
-    prob = 1 / (1 + math.exp(-score * 3))
-    return round(max(0.40, min(0.75, prob)), 4)
+    # Gentler sigmoid (2.2 vs the old 3.0) and wider caps — the market blend
+    # pulls the final number toward a realistic range, so the prior needn't be
+    # artificially compressed.
+    prob = 1 / (1 + math.exp(-score * 2.2))
+    return round(max(0.30, min(0.85, prob)), 4)
 
 
 def _write_losing_scenario(

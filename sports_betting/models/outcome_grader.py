@@ -289,12 +289,24 @@ def grade_all_pending(days_back: int = 3) -> int:
                 bet = dict(bet)
                 gid = bet.get("game_id", "")
 
-                # Try to find matching completed game
+                # Try to find matching completed game.
                 matched_game = None
-                for key, game in game_lookup.items():
-                    if key in gid.lower() or gid.lower() in key:
-                        matched_game = game
-                        break
+
+                # Most reliable: model game_ids are "mlb_<gamePk>" — match on the
+                # numeric pk directly. (Team-name matching below is the fallback
+                # for legacy rows whose game_id embeds a team name.)
+                gid_digits = "".join(ch for ch in gid if ch.isdigit())
+                if gid_digits:
+                    for game in completed:
+                        if str(game.get("game_pk")) == gid_digits:
+                            matched_game = game
+                            break
+
+                if not matched_game:
+                    for key, game in game_lookup.items():
+                        if key in gid.lower() or gid.lower() in key:
+                            matched_game = game
+                            break
                 # Broader match: any team name token in game_id
                 if not matched_game:
                     for game in completed:

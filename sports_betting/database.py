@@ -417,7 +417,29 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_team_stats ON team_stats(team_name, season);
             CREATE INDEX IF NOT EXISTS idx_pitcher_stats ON pitcher_stats(player_id, season)
         """)
+    _migrate_value_bets_columns()
     logger.info("Database initialised (%s)", "PostgreSQL" if _USE_PG else f"SQLite @ {DB_PATH}")
+
+
+def _migrate_value_bets_columns():
+    """
+    Add CLV-tracking columns to value_bets if missing. Safe to run repeatedly:
+    ALTER ... ADD COLUMN fails if the column exists, so each is tried in its own
+    statement and errors are ignored. This is what makes real CLV possible — the
+    old schema had no closing_price column, so CLV was permanently 0.
+    """
+    cols = [
+        ("closing_price", "REAL"),
+        ("market_novig_prob", "REAL"),
+        ("clv", "REAL"),
+    ]
+    for name, sqltype in cols:
+        try:
+            with get_db() as conn:
+                conn.execute(f"ALTER TABLE value_bets ADD COLUMN {name} {sqltype}")
+            logger.info("value_bets: added column %s", name)
+        except Exception:
+            pass  # already exists
 
 
 # ── DML helpers ────────────────────────────────────────────────────────
@@ -483,6 +505,142 @@ def save_value_bet(data: dict):
                     :implied_probability, :edge, :kelly_fraction, :recommended_bet,
                     :confidence, :factors)
         """, data)
+
+
+def record_model_pick(data: dict) -> bool:
+    """
+    Persist a model_v4 pick to value_bets so it can be graded and its CLV
+    tracked. This is the link that was previously MISSING — model picks were
+    shown to the user but never written to the DB, so grading, ROI, CLV and the
+    self-learning loop all ran on a disconnected pipeline.
+
+    Deduplicates on (game_id, side, market) per calendar day so re-running the
+    model doesn't create duplicate rows; a re-run instead refreshes the closing
+    line (see update_pick_closing).
+
+    Expected keys: game_id, side, market, book_price, model_probability,
+    implied_probability, edge, kelly_fraction, recommended_bet,
+    market_novig_prob, factors, home_team, away_team.
+    """
+    with get_db() as conn:
+        conn.execute("""
+            INSERT OR IGNORE INTO games (game_id, home_team, away_team, game_date, status)
+            VALUES (:game_id, :home_team, :away_team, date('now'), 'scheduled')
+        """, {
+            "game_id":   data.get("game_id"),
+            "home_team": data.get("home_team", "Unknown"),
+            "away_team": data.get("away_team", "Unknown"),
+        })
+
+        existing = conn.execute("""
+            SELECT id FROM value_bets
+            WHERE game_id=? AND side=? AND market=?
+            AND confidence='MODEL_PICK'
+            AND DATE(detected_at)=date('now')
+        """, (data.get("game_id"), data.get("side"), data.get("market"))).fetchone()
+        if existing:
+            # Refresh the latest line as we approach first pitch (closing proxy).
+            # Done inline on the same connection to avoid a nested-write lock.
+            if data.get("book_price") is not None:
+                conn.execute("""
+                    UPDATE value_bets SET closing_price=?
+                    WHERE game_id=? AND side=? AND market=?
+                    AND confidence='MODEL_PICK'
+                    AND DATE(detected_at)=date('now')
+                """, (data.get("book_price"), data.get("game_id"),
+                      data.get("side"), data.get("market")))
+            return False
+
+        conn.execute("""
+            INSERT INTO value_bets
+            (game_id, book, market, side, book_price, model_probability,
+             implied_probability, edge, kelly_fraction, recommended_bet,
+             confidence, factors, market_novig_prob)
+            VALUES (:game_id, :book, :market, :side, :book_price, :model_probability,
+                    :implied_probability, :edge, :kelly_fraction, :recommended_bet,
+                    'MODEL_PICK', :factors, :market_novig_prob)
+        """, {
+            "game_id":             data.get("game_id"),
+            "book":                data.get("book", "model"),
+            "market":              data.get("market", "full_game_ml"),
+            "side":                data.get("side"),
+            "book_price":          data.get("book_price"),
+            "model_probability":   data.get("model_probability"),
+            "implied_probability": data.get("implied_probability"),
+            "edge":                data.get("edge", 0),
+            "kelly_fraction":      data.get("kelly_fraction"),
+            "recommended_bet":     data.get("recommended_bet"),
+            "factors":             data.get("factors"),
+            "market_novig_prob":   data.get("market_novig_prob"),
+        })
+    return True
+
+
+def update_pick_closing(game_id: str, side: str, market: str,
+                        closing_price, closing_novig) -> None:
+    """
+    Update the closing line for today's still-pending pick. Because the model may
+    run multiple times a day, the last line we see before first pitch is our best
+    available proxy for the closing number — the basis for CLV.
+    """
+    if closing_price is None:
+        return
+    with get_db() as conn:
+        conn.execute("""
+            UPDATE value_bets
+            SET closing_price=?
+            WHERE game_id=? AND side=? AND market=?
+            AND confidence='MODEL_PICK'
+            AND DATE(detected_at)=date('now')
+        """, (closing_price, game_id, side, market))
+
+
+def get_clv_summary(days: int = 30) -> dict:
+    """
+    Average closing-line value across graded model picks. CLV here = the no-vig
+    closing probability minus the no-vig probability we bet at (positive = we
+    consistently beat the closing line, the #1 predictor of long-term edge).
+    """
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT book_price, closing_price, market_novig_prob
+            FROM value_bets
+            WHERE confidence='MODEL_PICK'
+            AND closing_price IS NOT NULL
+            AND book_price IS NOT NULL
+            AND detected_at >= datetime('now', ?)
+        """, (f"-{int(days)} days",)).fetchall()
+
+    def implied(price):
+        price = float(price)
+        return 100.0 / (price + 100.0) if price > 0 else abs(price) / (abs(price) + 100.0)
+
+    clvs = []
+    for r in rows:
+        r = dict(r)
+        # No-vig bet prob: prefer stored market_novig_prob, else raw implied.
+        bet_p = r.get("market_novig_prob") or implied(r["book_price"])
+        close_p = implied(r["closing_price"])
+        clvs.append(close_p - bet_p)
+
+    if not clvs:
+        return {"avg_clv": 0.0, "count": 0, "beat_close_pct": 0.0,
+                "assessment": "Insufficient data — CLV builds as picks are graded.",
+                "is_sharp": False}
+
+    avg = sum(clvs) / len(clvs)
+    beat = sum(1 for c in clvs if c > 0) / len(clvs)
+    return {
+        "avg_clv": round(avg, 4),
+        "count": len(clvs),
+        "beat_close_pct": round(beat, 4),
+        "assessment": (
+            "Beating the close — genuine edge signal." if avg > 0.005
+            else "Roughly at market — no demonstrated edge yet." if avg > -0.005
+            else "Losing to the close — model is on the wrong side."
+        ),
+        "is_sharp": avg > 0.01 and beat > 0.5,
+    }
 
 
 def save_arb_opportunity(data: dict):
