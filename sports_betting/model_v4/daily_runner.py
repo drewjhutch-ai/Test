@@ -506,23 +506,34 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
             confirmed_factors=confirmed_factors,
         )
 
-        # ── MARKET EDGE GATE (quality over quantity) ─────────────────
-        # The decisive filter: we only bet when the blended fair probability
-        # beats the market's fair line by the cushion AND the price is +EV.
-        # This is where the ROI lives; it also means some days produce zero
-        # picks, which is correct — we do not force a card.
-        if pick.tier != "SKIP":
-            if not has_market:
-                pick.tier = "SKIP"
-                pick.skip_reason = "No real two-way market odds — cannot price an edge."
-            elif not market["qualifies"]:
-                pick.tier = "SKIP"
-                pick.skip_reason = (
-                    f"No edge vs market: fair {market['p_market_novig']:.1%} "
-                    f"vs blended {market['p_blend']:.1%} "
-                    f"(edge {market['edge_market']:+.1%}, need +{int(EDGE_CUSHION*100)}%; "
-                    f"price edge {market['edge_price']:+.1%})"
-                )
+        # ── MARKET EDGE GATE decides the pick (quality over quantity) ─────
+        # The decision is driven by the market edge, NOT the old absolute-
+        # probability tier thresholds (which were built for the un-anchored
+        # model and reject nearly every market-anchored pick because blended
+        # probabilities cluster near 0.50). We keep only genuine "do not bet"
+        # vetoes (rain-out, unknown starters); everything else is governed by
+        # edge, and the tier is derived from edge magnitude for sizing.
+        rain_out = getattr(pick.weather, "rain_pct", 0) >= 50
+        tbd = pick.backing_team in ("", None) or pick.backing_pitcher.name in ("TBD", "")
+        if not has_market:
+            pick.tier = "SKIP"
+            pick.skip_reason = "No real two-way market odds — cannot price an edge."
+        elif rain_out:
+            pick.tier = "SKIP"
+            pick.skip_reason = f"Rain {pick.weather.rain_pct:.0f}% — do not bet."
+        elif not market["qualifies"]:
+            pick.tier = "SKIP"
+            pick.skip_reason = (
+                f"No edge vs market: fair {market['p_market_novig']:.1%} "
+                f"vs blended {market['p_blend']:.1%} "
+                f"(edge {market['edge_market']:+.1%}, need +{int(EDGE_CUSHION*100)}%; "
+                f"price edge {market['edge_price']:+.1%})"
+            )
+        else:
+            # Genuine +EV edge over the market → this IS a pick. Size by edge.
+            pick.tier = _tier_from_edge(market["edge_market"])
+            pick.skip_reason = None
+            pick.losing_pct = round(1 - market["p_blend"], 4)
 
         if pick.tier == "SKIP":
             skip_detail = (
@@ -692,6 +703,18 @@ _BOOK_PRIORITY = [
     "pinnacle", "draftkings", "fanduel", "betmgm", "williamhill_us",
     "caesars", "espn_bet", "espnbet", "espn", "betrivers", "pointsbet",
 ]
+
+
+def _tier_from_edge(edge_market: float) -> str:
+    """
+    Derive a display/sizing tier from the market edge (already >= EDGE_CUSHION
+    when this is called). Bigger edge over the fair line = higher conviction.
+    """
+    if edge_market >= 0.06:
+        return "STRONG"
+    if edge_market >= 0.045:
+        return "MEDIUM"
+    return "LEAN"
 
 
 def _norm_team(name: str | None) -> str:

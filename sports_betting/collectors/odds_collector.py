@@ -144,21 +144,10 @@ def _fetch_espn_odds() -> list[dict]:
 #  Public interface                                                     #
 # ------------------------------------------------------------------ #
 
-def get_live_odds() -> list[dict]:
-    """
-    Fetch live odds. Tries ESPN first (free, no quota).
-    Falls back to The Odds API when ODDS_API_KEY is set and ESPN returns nothing.
-    """
-    # --- Primary: ESPN ---
-    espn = _fetch_espn_odds()
-    if espn:
-        return espn
-
-    # --- Fallback: The Odds API ---
+def _fetch_odds_api() -> list[dict]:
+    """Fetch full-slate odds from The Odds API (needs ODDS_API_KEY)."""
     if not ODDS_API_KEY:
-        logger.warning("No ODDS_API_KEY and ESPN returned nothing — using mock data.")
-        return _mock_odds()
-
+        return []
     try:
         url = f"{ODDS_API_BASE}/sports/{ODDS_SPORT}/odds"
         params = {
@@ -171,19 +160,64 @@ def get_live_odds() -> list[dict]:
         resp = requests.get(url, params=params, timeout=15)
         resp.raise_for_status()
         remaining = resp.headers.get("x-requests-remaining", "?")
-        logger.info("Odds API fallback succeeded. Remaining quota: %s", remaining)
-        return resp.json()
+        data = resp.json()
+        logger.info("Odds API: %d games. Remaining quota: %s", len(data), remaining)
+        return data
     except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 401:
-            logger.error("Odds API: invalid key or quota exceeded — odds unavailable")
-        elif e.response.status_code == 429:
-            logger.error("Odds API: rate limit hit")
-        else:
-            logger.error("Odds API HTTP error: %s", e)
+        code = getattr(e.response, "status_code", "?")
+        logger.error("Odds API HTTP %s (invalid key / quota / rate limit)", code)
         return []
     except Exception as e:
         logger.error("Odds API fetch failed: %s", e)
         return []
+
+
+def _count_h2h(games: list[dict]) -> int:
+    """How many games actually carry a two-way moneyline from any book."""
+    n = 0
+    for g in games:
+        for bk in g.get("bookmakers", []):
+            has = any(
+                m.get("key") == "h2h" and len(m.get("outcomes", [])) >= 2
+                for m in bk.get("markets", [])
+            )
+            if has:
+                n += 1
+                break
+    return n
+
+
+def get_live_odds() -> list[dict]:
+    """
+    Fetch live odds, preferring the source with the BEST moneyline coverage.
+
+    The Odds API (when ODDS_API_KEY is set) covers the full slate with real
+    books, so it is used as primary. ESPN's free scoreboard often carries
+    moneylines for only a few games early in the day, so it is used only when
+    there's no key — and only if it actually returns more h2h coverage than we'd
+    otherwise have. Without any odds we do NOT fabricate mock lines (the model
+    now refuses to bet without a real market).
+    """
+    # --- Primary: The Odds API (full coverage) when a key is configured ---
+    if ODDS_API_KEY:
+        api = _fetch_odds_api()
+        if _count_h2h(api) > 0:
+            return api
+        logger.warning("Odds API returned no usable h2h — falling back to ESPN.")
+
+    # --- ESPN (free, partial coverage) ---
+    espn = _fetch_espn_odds()
+    espn_h2h = _count_h2h(espn)
+    if espn_h2h > 0:
+        logger.info("Using ESPN odds: %d/%d games have a moneyline.", espn_h2h, len(espn))
+        return espn
+
+    logger.warning(
+        "No usable moneylines from any source (ODDS_API_KEY set: %s). "
+        "Games will be skipped as 'no market'. Set ODDS_API_KEY for full coverage.",
+        bool(ODDS_API_KEY),
+    )
+    return espn or []
 
 
 
