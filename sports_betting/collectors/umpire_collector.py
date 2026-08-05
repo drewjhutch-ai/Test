@@ -171,8 +171,12 @@ def get_todays_umpires(date_str: str | None = None) -> dict[str, dict]:
         logger.info("umpire_collector: no umpire assignments posted yet for %s", date_str)
         return _TODAY_CACHE
 
-    # Step 2: try to enrich with Covers historical O/U (best-effort, 8s cap)
-    tendencies = _get_covers_cached()
+    # Step 2: try to enrich with Covers historical O/U (best-effort, 8s cap).
+    # Covers is blocked from cloud IPs; skip it by default — umpire NAMES (the
+    # part that matters) come from MLB above; O/U tendency just defaults to 0.50.
+    import os as _os
+    _use_scrapers = _os.getenv("USE_BLOCKED_SCRAPERS", "").lower() in ("1", "true", "yes")
+    tendencies = _get_covers_cached() if _use_scrapers else {}
 
     result: dict[str, dict] = {}
     for game_id, hp_ump in assignments.items():

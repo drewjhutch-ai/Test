@@ -186,10 +186,12 @@ def get_bullpen_fatigue() -> dict[str, dict]:
     if _CACHE and (now - _CACHE_TS) < _TTL:
         return _CACHE
 
-    # Try primary source first
-    data = _scrape_insidethepen()
+    # MLB StatsAPI is primary (real, cloud-reachable). InsideThePen (blocked)
+    # only when explicitly enabled — otherwise it just burns the timeout.
+    import os as _os
+    _use_scrapers = _os.getenv("USE_BLOCKED_SCRAPERS", "").lower() in ("1", "true", "yes")
+    data = _scrape_insidethepen() if _use_scrapers else {}
     if not data:
-        logger.info("bullpen_fatigue_collector: InsideThePen empty, falling back to MLB API")
         data = _fetch_via_mlb_api()
 
     if data:

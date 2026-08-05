@@ -11,6 +11,15 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+import os as _os
+# Blocked-site scrapers (RotoWire/Covers/InsideThePen/Savant) are unreachable
+# from Streamlit Cloud IPs and just burn the startup timeout before we fall back
+# to the MLB StatsAPI anyway. Skip them by default; the MLB API path returns real
+# data fast. Set USE_BLOCKED_SCRAPERS=1 to re-enable (e.g. running locally).
+def _use_blocked_scrapers() -> bool:
+    return _os.getenv("USE_BLOCKED_SCRAPERS", "").lower() in ("1", "true", "yes")
+
+
 _ROTOWIRE_URL = "https://www.rotowire.com/baseball/daily-lineups.php"
 _MLB_SCHEDULE_URL = (
     "https://statsapi.mlb.com/api/v1/schedule"
@@ -158,7 +167,8 @@ def get_lineups(date_str: str | None = None) -> dict[str, dict]:
     if date_str is None:
         date_str = datetime.now().strftime("%Y-%m-%d")
 
-    roto_data = _fetch_rotowire(date_str)
+    # MLB StatsAPI is primary (real, cloud-reachable). RotoWire only when explicitly enabled.
+    roto_data = _fetch_rotowire(date_str) if _use_blocked_scrapers() else {}
     mlb_data  = _fetch_mlb_api(date_str)
 
     # Merge: prefer MLB API confirmed lineups; fill gaps with RotoWire

@@ -178,14 +178,17 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
     with ThreadPoolExecutor(max_workers=20) as _pool:
         _f_fg       = _pool.submit(get_pitcher_stats_fangraphs)       # MLB API — no timeout needed
         _f_sc       = _pool.submit(get_statcast_pitcher_metrics)       # MLB API — no timeout needed
-        _f_vel_fg   = _pool.submit(_timed, get_pitcher_velocity_trends, timeout=8, default={})  # Savant — blocked
+        # Savant velocity (get_pitcher_velocity_trends) removed — blocked on cloud
+        # and redundant: get_velocity_data below already supplies MLB velocity.
         _f_hr       = _pool.submit(get_pitcher_hr_vulnerability)       # MLB API — no timeout needed
         _f_xwoba_lk = _pool.submit(get_team_xwoba_luck)               # MLB API — no timeout needed
         _f_px       = _pool.submit(get_pitcher_xstats)
         _f_tx       = _pool.submit(get_team_xwoba)
         _f_vel      = _pool.submit(get_velocity_data)
         _f_frm      = _pool.submit(get_framing_by_team)
-        _f_ump      = _pool.submit(_timed, get_todays_umpires, date_str,  timeout=10, default={})
+        # These now go straight to the MLB StatsAPI (scrapers skipped by default),
+        # so they return real data fast — the timeout is just a safety cap.
+        _f_ump      = _pool.submit(_timed, get_todays_umpires, date_str,  timeout=8, default={})
         _f_bull     = _pool.submit(_timed, get_bullpen_fatigue,           timeout=10, default={})
         _f_csw      = _pool.submit(get_pitcher_csw)
         _f_stuff    = _pool.submit(get_stuff_plus)
@@ -194,12 +197,12 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
         _f_pitch    = _pool.submit(get_pitch_mix_changes)
         _f_luck     = _pool.submit(get_luck_metrics)
         _f_platoon  = _pool.submit(get_platoon_splits)
-        _f_lineup   = _pool.submit(_timed, get_lineups, date_str, timeout=15, default={})
+        _f_lineup   = _pool.submit(_timed, get_lineups, date_str, timeout=8, default={})
         _f_bat      = _pool.submit(get_bat_speed_metrics)
 
         fg_stats           = _f_fg.result()
         sc_stats           = _f_sc.result()
-        velocity_data      = _f_vel_fg.result()
+        velocity_data      = {}  # Savant velocity-trends dropped (blocked/redundant)
         hr_vuln_data       = _f_hr.result()
         xwoba_luck         = _f_xwoba_lk.result()
         t1_pitcher_xstats  = _f_px.result()
