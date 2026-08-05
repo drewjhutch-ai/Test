@@ -18,5 +18,11 @@ lightgbm>=4.1.0
 pybaseball>=2.2.7
 twilio>=8.0.0
 streamlit>=1.35.0
+# Pin Starlette below 0.48: 0.48 made `thread_minimum_size` a required arg on
+# its GZip middleware, which the current Streamlit server build doesn't pass —
+# causing the app to 500 on startup ("GZipResponder.__init__() missing ...
+# 'thread_minimum_size'"). Constraining Starlette here lets the resolver pick a
+# compatible Streamlit+Starlette pair.
+starlette<0.48
 anthropic>=0.40.0
 psycopg2-binary>=2.9.0
