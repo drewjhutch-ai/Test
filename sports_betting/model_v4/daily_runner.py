@@ -65,13 +65,22 @@ from ..signals.aggregator import run_all_signals, build_signal_factors
 
 logger = logging.getLogger(__name__)
 
+# Shared, long-lived worker pool for _timed. Using a module-level pool (rather
+# than `with ThreadPoolExecutor()` per call) is CRITICAL: the context-manager
+# form calls shutdown(wait=True) on exit, which blocks until the wrapped call
+# finishes — so the "timeout" never actually fired and a hung collector could
+# stall the whole run for minutes. With a persistent pool we return the default
+# the instant the timeout elapses; the stuck thread is abandoned (daemon) and
+# dies on its own without holding up the model run.
+_TIMED_POOL = ThreadPoolExecutor(max_workers=24, thread_name_prefix="timed")
+
 
 def _timed(fn, *args, timeout: int = 8, default=None, **kwargs):
-    """Call fn(*args, **kwargs) with a hard wall-clock timeout. Returns default on timeout/error."""
+    """Call fn with a REAL wall-clock timeout. Returns default on timeout/error
+    without waiting for a hung call to finish."""
     try:
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(fn, *args, **kwargs)
-            return future.result(timeout=timeout)
+        future = _TIMED_POOL.submit(fn, *args, **kwargs)
+        return future.result(timeout=timeout)
     except FuturesTimeout:
         logger.warning("_timed: %s timed out after %ds — using default", getattr(fn, "__name__", fn), timeout)
         return default if default is not None else {}
@@ -172,33 +181,36 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
         )
 
     # All enrichment data fetched in parallel — keeps boot time under 60s.
-    # Only calls that hit blocked external sites (Savant/Covers/InsideThePen) use _timed().
-    # MLB Stats API calls run directly — they work from cloud and need up to 20s for 500 pitchers.
+    # EVERY collector is wrapped in _timed with a hard cap so no single slow /
+    # blocked source can stall the whole run (this was the ~6-minute startup
+    # bug). Core pitcher data (FanGraphs/Statcast) gets a generous cap because
+    # it feeds the pitcher score and is bulk-fetched + cached daily; the
+    # context-only collectors get a short cap — if they don't answer quickly we
+    # proceed without them (they don't affect the pick).
     logger.info("Fetching all enrichment data in parallel...")
-    with ThreadPoolExecutor(max_workers=20) as _pool:
-        _f_fg       = _pool.submit(get_pitcher_stats_fangraphs)       # MLB API — no timeout needed
-        _f_sc       = _pool.submit(get_statcast_pitcher_metrics)       # MLB API — no timeout needed
+    _CORE_T, _CTX_T = 30, 6
+    with ThreadPoolExecutor(max_workers=24) as _pool:
+        _f_fg       = _pool.submit(_timed, get_pitcher_stats_fangraphs, timeout=_CORE_T, default={})
+        _f_sc       = _pool.submit(_timed, get_statcast_pitcher_metrics, timeout=_CORE_T, default={})
         # Savant velocity (get_pitcher_velocity_trends) removed — blocked on cloud
         # and redundant: get_velocity_data below already supplies MLB velocity.
-        _f_hr       = _pool.submit(get_pitcher_hr_vulnerability)       # MLB API — no timeout needed
-        _f_xwoba_lk = _pool.submit(get_team_xwoba_luck)               # MLB API — no timeout needed
-        _f_px       = _pool.submit(get_pitcher_xstats)
-        _f_tx       = _pool.submit(get_team_xwoba)
-        _f_vel      = _pool.submit(get_velocity_data)
-        _f_frm      = _pool.submit(get_framing_by_team)
-        # These now go straight to the MLB StatsAPI (scrapers skipped by default),
-        # so they return real data fast — the timeout is just a safety cap.
-        _f_ump      = _pool.submit(_timed, get_todays_umpires, date_str,  timeout=8, default={})
-        _f_bull     = _pool.submit(_timed, get_bullpen_fatigue,           timeout=10, default={})
-        _f_csw      = _pool.submit(get_pitcher_csw)
-        _f_stuff    = _pool.submit(get_stuff_plus)
-        _f_travel   = _pool.submit(get_travel_fatigue, date_str)
-        _f_defense  = _pool.submit(get_team_oaa)
-        _f_pitch    = _pool.submit(get_pitch_mix_changes)
-        _f_luck     = _pool.submit(get_luck_metrics)
-        _f_platoon  = _pool.submit(get_platoon_splits)
-        _f_lineup   = _pool.submit(_timed, get_lineups, date_str, timeout=8, default={})
-        _f_bat      = _pool.submit(get_bat_speed_metrics)
+        _f_hr       = _pool.submit(_timed, get_pitcher_hr_vulnerability, timeout=_CTX_T, default={})
+        _f_xwoba_lk = _pool.submit(_timed, get_team_xwoba_luck,          timeout=_CTX_T, default={})
+        _f_px       = _pool.submit(_timed, get_pitcher_xstats,          timeout=_CTX_T, default={})
+        _f_tx       = _pool.submit(_timed, get_team_xwoba,              timeout=_CTX_T, default={})
+        _f_vel      = _pool.submit(_timed, get_velocity_data,           timeout=_CTX_T, default={})
+        _f_frm      = _pool.submit(_timed, get_framing_by_team,         timeout=_CTX_T, default={})
+        _f_ump      = _pool.submit(_timed, get_todays_umpires, date_str, timeout=_CTX_T, default={})
+        _f_bull     = _pool.submit(_timed, get_bullpen_fatigue,         timeout=_CTX_T, default={})
+        _f_csw      = _pool.submit(_timed, get_pitcher_csw,             timeout=_CTX_T, default={})
+        _f_stuff    = _pool.submit(_timed, get_stuff_plus,             timeout=_CTX_T, default={})
+        _f_travel   = _pool.submit(_timed, get_travel_fatigue, date_str, timeout=_CTX_T, default={})
+        _f_defense  = _pool.submit(_timed, get_team_oaa,               timeout=_CTX_T, default={})
+        _f_pitch    = _pool.submit(_timed, get_pitch_mix_changes,       timeout=_CTX_T, default={})
+        _f_luck     = _pool.submit(_timed, get_luck_metrics,           timeout=_CTX_T, default={})
+        _f_platoon  = _pool.submit(_timed, get_platoon_splits,         timeout=_CTX_T, default={})
+        _f_lineup   = _pool.submit(_timed, get_lineups, date_str,       timeout=_CTX_T, default={})
+        _f_bat      = _pool.submit(_timed, get_bat_speed_metrics,       timeout=_CTX_T, default={})
 
         fg_stats           = _f_fg.result()
         sc_stats           = _f_sc.result()
