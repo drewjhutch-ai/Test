@@ -2102,7 +2102,11 @@ def render_ask_ai_tab(picks: list, parlays: list):
 
 def main():
     inject_css()
-    get_db_connection()
+    # DB init must never white-screen the whole app — degrade gracefully.
+    try:
+        get_db_connection()
+    except Exception as e:
+        st.warning(f"Database init issue (continuing anyway): {e}")
 
     # Grade ALL pending picks every load (no session cache — games finish at
     # different times and we want results to appear as soon as possible).
@@ -2205,4 +2209,13 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # Never let an unhandled exception show Streamlit's opaque "Oh no" page —
+    # surface the actual error in-app so it's diagnosable and the shell still loads.
+    try:
+        main()
+    except Exception as _fatal:
+        import traceback as _tb
+        st.error("⚠️ The app hit an unexpected error while loading. Details below:")
+        st.exception(_fatal)
+        with st.expander("Full traceback"):
+            st.code(_tb.format_exc())
