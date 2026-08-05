@@ -1261,12 +1261,16 @@ def render_model_intelligence():
 
     try:
         with get_db() as conn:
-            graded_count = conn.execute(
-                "SELECT COUNT(*) FROM value_bets WHERE result IN ('WIN','LOSS')"
-            ).fetchone()[0]
-            last_retrain = conn.execute(
-                "SELECT MAX(updated_at) FROM model_weights"
-            ).fetchone()[0]
+            # Use aliased columns + string keys: PostgreSQL returns dict rows, so
+            # fetchone()[0] raises KeyError: 0 (which showed as "unavailable: 0").
+            _gr = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM value_bets WHERE result IN ('WIN','LOSS')"
+            ).fetchone()
+            graded_count = (dict(_gr).get("cnt", 0) if _gr else 0) or 0
+            _rr = conn.execute(
+                "SELECT MAX(updated_at) AS last FROM model_weights"
+            ).fetchone()
+            last_retrain = dict(_rr).get("last") if _rr else None
 
         c1, c2, c3 = st.columns(3)
         c1.metric("Graded Picks", graded_count)
@@ -1275,7 +1279,14 @@ def render_model_intelligence():
         c3.metric("Until Next Threshold Update", f"{max(0, 50 - graded_count)} more picks" if graded_count < 50 else "Active")
 
         if graded_count < 5:
-            st.info("Need at least 5 graded picks to show learning insights. Grade your bets in the Record tab.")
+            st.info(
+                f"🌱 **Nothing learned yet — {graded_count} graded picks.** This is expected, not a bug. "
+                "Picks are graded automatically once their games finish, and the model deliberately keeps "
+                "its learning dormant until a healthy sample builds up (factor weights need ~50 graded "
+                "picks, tier thresholds ~200) so it can't over-fit to a few noisy results. Patterns will "
+                "appear here as your picks settle. Until then, judge the model by **CLV** on the "
+                "Intelligence (📡) tab, not by learned patterns."
+            )
             return
 
         tab_f, tab_t, tab_m, tab_c = st.tabs(["📊 Factor Performance", "🎯 Tier Accuracy", "🏪 Market Win Rates", "🔍 Context Patterns"])
