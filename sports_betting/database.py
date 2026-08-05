@@ -702,6 +702,74 @@ def get_model_roi(days: int = 3650, model_version: str | None = None) -> dict:
     }
 
 
+def get_calibration_summary(days: int = 3650, model_version: str | None = None) -> dict:
+    """
+    Calibration + accuracy of graded model picks. Answers "when the model says
+    58%, does it win ~58%?" — the thing that separates a real edge from an
+    overconfident one. Uses the blended probability we actually bet at
+    (model_probability) vs the 0/1 outcome.
+
+      - brier      : mean squared error (lower is better; 0.25 = coin flip)
+      - log_loss   : penalises confident wrong calls (lower is better)
+      - reliability: predicted vs observed win rate, bucketed
+    """
+    cutoff = (_dt.now(timezone.utc) - timedelta(days=int(days))).isoformat()
+    where = ["confidence='MODEL_PICK'", "result IN ('WIN','LOSS')",
+             "model_probability IS NOT NULL", "detected_at >= ?"]
+    params: list = [cutoff]
+    if model_version:
+        where.append("model_version=?")
+        params.append(model_version)
+
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT model_probability, result FROM value_bets WHERE "
+            + " AND ".join(where), tuple(params),
+        ).fetchall()
+
+    pairs = [(float(r["model_probability"]), 1.0 if r["result"] == "WIN" else 0.0)
+             for r in (dict(x) for x in rows) if r.get("model_probability")]
+    n = len(pairs)
+    if n == 0:
+        return {"count": 0, "status": "no_graded_picks_yet"}
+
+    import math as _m
+    brier = sum((p - y) ** 2 for p, y in pairs) / n
+    log_loss = -sum(
+        y * _m.log(min(max(p, 1e-9), 1 - 1e-9)) +
+        (1 - y) * _m.log(min(max(1 - p, 1e-9), 1 - 1e-9))
+        for p, y in pairs
+    ) / n
+
+    # Reliability buckets (0.40-0.50, 0.50-0.60, ...)
+    buckets: dict[str, list] = {}
+    for p, y in pairs:
+        lo = int(p * 10) / 10.0
+        key = f"{lo:.1f}-{lo+0.1:.1f}"
+        buckets.setdefault(key, []).append((p, y))
+    reliability = []
+    for key in sorted(buckets):
+        pts = buckets[key]
+        reliability.append({
+            "bucket": key,
+            "n": len(pts),
+            "predicted": round(sum(p for p, _ in pts) / len(pts), 3),
+            "observed": round(sum(y for _, y in pts) / len(pts), 3),
+        })
+
+    return {
+        "count": n,
+        "brier": round(brier, 4),
+        "log_loss": round(log_loss, 4),
+        "reliability": reliability,
+        "assessment": (
+            "Well-calibrated (better than coin flip)." if brier < 0.24
+            else "Roughly coin-flip — not yet showing skill." if brier < 0.26
+            else "Miscalibrated / overconfident — review inputs."
+        ),
+    }
+
+
 def save_arb_opportunity(data: dict):
     with get_db() as conn:
         conn.execute("""

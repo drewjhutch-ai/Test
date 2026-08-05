@@ -738,13 +738,43 @@ def render_nrfi_tab(nrfi_ranked: list, nrfi_parlay: dict | None = None):
     """)
 
 
+def _model_health_verdict(clv: dict, roi: dict, cal: dict) -> str:
+    """One honest sentence on where the model actually stands right now."""
+    graded = roi.get("graded", 0) or 0
+    if graded == 0:
+        return (":blue[**Evaluation phase — no graded picks yet.**] The rework is sound in "
+                "design but unproven. Metrics fill in as picks settle; judge on CLV first.")
+    if graded < 30:
+        return (f":orange[**Early evaluation ({graded} graded).**] Too small to trust — this is "
+                "noise territory. Watch the CLV trend, not the win/loss record.")
+
+    avg_clv = clv.get("avg_clv", 0) or 0
+    brier = cal.get("brier", 0.25) or 0.25
+    clv_good = avg_clv > 0.005
+    cal_good = brier < 0.245
+    if clv_good and cal_good:
+        return (f":green[**Promising ({graded} graded).**] Beating the close (CLV "
+                f"{avg_clv*100:+.1f}%) and well-calibrated (Brier {brier:.3f}) — the signal "
+                "that matters is positive. Keep sample growing toward ~200 before sizing up.")
+    if clv_good:
+        return (f":green[**Beating the close**] (CLV {avg_clv*100:+.1f}%) over {graded} picks, "
+                f"though calibration is still loose (Brier {brier:.3f}). CLV is the leading "
+                "indicator — this is a genuinely encouraging sign.")
+    if avg_clv > -0.005:
+        return (f":orange[**At market ({graded} graded).**] CLV {avg_clv*100:+.1f}% — no "
+                "demonstrated edge yet, but not bleeding. Needs more data or a tuning pass.")
+    return (f":red[**Losing to the close ({graded} graded).**] CLV {avg_clv*100:+.1f}% means the "
+            "model's disagreements are on the wrong side. Tighten the edge cushion or revisit inputs.")
+
+
 def render_intelligence_tab(all_signals: dict, xwoba_luck: dict, games: list, sharp_plays: list = None):
     """Signal 📡 Intelligence — all 13 signals summarized per game."""
-    from sports_betting.database import get_clv_summary, get_model_roi
+    from sports_betting.database import get_clv_summary, get_model_roi, get_calibration_summary
     from sports_betting.model_v4.market_model import MODEL_VERSION
 
     st.markdown("### 📡 Model Intelligence Dashboard")
-    st.caption("All 13 advanced signals running on today's slate. These feed directly into pick factor counts.")
+    st.caption("Context signals for today's slate. NOTE: the pick decision is driven by the market edge gate — "
+               "these signals are supporting context, not the primary driver of the number.")
 
     # ── Rework scorecard: results tracked in isolation for this model version ──
     st.markdown(f"#### 🧪 Rework scorecard · `{MODEL_VERSION}`")
@@ -752,20 +782,29 @@ def render_intelligence_tab(all_signals: dict, xwoba_luck: dict, games: list, sh
     try:
         clv = get_clv_summary(model_version=MODEL_VERSION)
         roi = get_model_roi(model_version=MODEL_VERSION)
+        cal = get_calibration_summary(model_version=MODEL_VERSION)
     except Exception as _e:
         st.warning(f"Scorecard temporarily unavailable: {_e}")
-        clv, roi = {"count": 0, "avg_clv": 0}, {"graded": 0}
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Avg CLV", f"{clv.get('avg_clv', 0)*100:+.2f}%", help="No-vig closing prob minus the no-vig prob we bet at. Positive = beating the close.")
+        clv, roi, cal = {"count": 0, "avg_clv": 0}, {"graded": 0}, {"count": 0}
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Avg CLV", f"{clv.get('avg_clv', 0)*100:+.2f}%", help="No-vig closing prob minus the no-vig prob we bet at. Positive = beating the close. This is the #1 metric.")
     c2.metric("Beat close", f"{clv.get('beat_close_pct', 0)*100:.0f}%" if clv.get("count") else "—")
-    c3.metric("Graded picks", roi.get("graded", 0))
+    c3.metric("Graded", roi.get("graded", 0), help="How many picks have completed and been scored.")
     c4.metric("ROI", f"{roi.get('roi_pct', 0):+.1f}%" if roi.get("graded") else "—",
               help=f"Record: {roi.get('wins', 0)}-{roi.get('losses', 0)} · hit rate {roi.get('hit_rate', 0)*100:.0f}%" if roi.get("graded") else "Builds as picks are graded.")
-    if clv.get("count", 0) > 0:
-        color = "green" if clv["is_sharp"] else "orange"
-        st.markdown(f"**CLV read:** :{color}[{clv['assessment']}]")
-    else:
-        st.info("📈 CLV/ROI populate as this rework's picks are graded and games complete. Give it a few weeks before judging.")
+    c5.metric("Brier", f"{cal.get('brier', 0):.3f}" if cal.get("count") else "—",
+              help="Calibration error (lower better; 0.25 = coin flip). Are the model's stated probabilities honest?")
+
+    # Plain-language health verdict — always tells you exactly where you stand.
+    st.markdown(f"**Model health:** {_model_health_verdict(clv, roi, cal)}")
+
+    # Reliability table appears once there's enough graded data to be meaningful.
+    if cal.get("count", 0) >= 20 and cal.get("reliability"):
+        with st.expander("📐 Calibration detail (predicted vs actual win rate)"):
+            import pandas as _pd
+            st.caption(f"Brier {cal['brier']} · log-loss {cal['log_loss']} · {cal['assessment']}")
+            st.dataframe(_pd.DataFrame(cal["reliability"]), hide_index=True, use_container_width=True)
     st.markdown("---")
 
     if not all_signals:
@@ -843,7 +882,12 @@ def render_intelligence_tab(all_signals: dict, xwoba_luck: dict, games: list, sh
     # Sharp money signals
     if sharp_plays:
         st.markdown("---")
-        st.markdown("### 🔍 Sharp Money Signals")
+        st.markdown("### 🔍 Line-Movement Signals")
+        st.caption(
+            "⚠️ Heuristic only. These are inferred from line movement between our own "
+            "odds snapshots — NOT real ticket/money split data (no such feed is connected). "
+            "They are context, and do not affect the pick decision."
+        )
         for sp in sharp_plays[:8]:
             strength = sp.get("signal_strength", 0)
             color = "red" if strength >= 0.7 else "orange" if strength >= 0.4 else "gray"

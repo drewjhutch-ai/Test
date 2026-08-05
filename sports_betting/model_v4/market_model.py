@@ -21,6 +21,7 @@ So instead of trusting the model's raw number, we:
 Everything here is pure math with no I/O so it is trivially unit-testable.
 """
 from __future__ import annotations
+import os
 import math
 
 # Version tag stamped on every pick this reworked model produces, so its results
@@ -28,21 +29,32 @@ import math
 # Bump this string whenever the pick-generation logic changes materially.
 MODEL_VERSION = "2026.06-market-anchor"
 
-# ── Tunable constants ────────────────────────────────────────────────
-# How much weight the model's own estimate gets when blended with the
-# market. The market gets (1 - MODEL_WEIGHT). Retail models rarely justify
-# more than ~30% of their own weight; 0.25 is a deliberately humble default.
-DEFAULT_MODEL_WEIGHT = 0.25
+
+def _env_float(name: str, default: float) -> float:
+    """Read a float tuning knob from the environment (Streamlit secrets are
+    loaded into env at startup), falling back to the default on any problem."""
+    try:
+        v = os.getenv(name)
+        return float(v) if v is not None and v != "" else default
+    except (TypeError, ValueError):
+        return default
+
+
+# ── Tunable constants (override via env / Streamlit secrets, no code change) ──
+# How much weight the model's own estimate gets when blended with the market.
+# The market gets (1 - MODEL_WEIGHT). Retail models rarely justify more than
+# ~30% of their own weight; 0.25 is a deliberately humble default.
+DEFAULT_MODEL_WEIGHT = _env_float("MODEL_WEIGHT", 0.25)
 
 # Minimum edge, in no-vig probability terms, of the blended estimate over the
 # market's fair probability before we will bet. ~3% is the "cushion beyond the
 # overround" that flipped a real public MLB model to profit in backtests.
-EDGE_CUSHION = 0.03
+EDGE_CUSHION = _env_float("EDGE_CUSHION", 0.03)
 
 # Fraction of full Kelly to stake. Full Kelly has a ~1/3 chance of halving the
 # bankroll before doubling it; quarter-Kelly captures most of the growth with a
 # fraction of the variance and buffers against our probability error.
-KELLY_FRACTION = 0.25
+KELLY_FRACTION = _env_float("KELLY_FRACTION", 0.25)
 
 # Probability clamp for blended output — avoids absurd extremes from bad data.
 _MIN_PROB = 0.02
