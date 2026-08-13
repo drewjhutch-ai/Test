@@ -566,15 +566,21 @@ def render_picks_tab(picks: list):
 
 def render_parlays_tab(parlays: list, nrfi_parlay: dict | None):
     st.markdown("""
-    <div style="margin-bottom:20px">
-        <div style="color:#f1f5f9;font-size:20px;font-weight:800">🎰 Daily Parlay Card</div>
-        <div style="color:#475569;font-size:12px;margin-top:2px">5 parlays built daily · ⭐ high confidence · ⚠️ best available</div>
+    <div style="margin-bottom:14px">
+        <div style="color:#f1f5f9;font-size:20px;font-weight:800">🎰 Parlay Ladder (2 → 6 legs)</div>
+        <div style="color:#475569;font-size:12px;margin-top:2px">Each rung uses the strongest available +EV picks. Climb for bigger payouts &amp; lower hit-chance.</div>
     </div>
     """, unsafe_allow_html=True)
 
     if not parlays:
-        st.info("No picks available to build parlays — run the model first.")
+        st.info("No parlays today — need at least 2 qualifying (+EV) picks to build a ladder. Thin slate or no edge found.")
         return
+
+    st.caption(
+        "🎟️ **Big-payoff style, honestly labelled.** Every leg is an individual +EV pick, so these are "
+        "longshots *with edge* — not chalk. But parlays hit rarely by nature: check the **Hit chance** on "
+        "each rung. Higher rungs pay more and hit less. Bet small; treat the top rungs as lottery tickets."
+    )
 
     parlay_icons = ["🥇", "🥈", "🥉", "🎯", "🌙", "🎰"]
     parlay_accents = ["#f59e0b", "#94a3b8", "#cd7c3a", "#3b82f6", "#8b5cf6", "#64748b"]
@@ -602,11 +608,13 @@ def render_parlays_tab(parlays: list, nrfi_parlay: dict | None):
                 </div>
                 <div style="display:flex;gap:24px">
                     <div style="text-align:center"><div style="color:#475569;font-size:10px;text-transform:uppercase;letter-spacing:0.08em">Odds</div><div style="color:#f59e0b;font-size:18px;font-weight:800">+{parlay.american_odds:,}</div></div>
+                    <div style="text-align:center"><div style="color:#475569;font-size:10px;text-transform:uppercase;letter-spacing:0.08em">Hit&nbsp;chance</div><div style="color:#38bdf8;font-size:18px;font-weight:800">{parlay.combined_prob:.0%}</div></div>
                     <div style="text-align:center"><div style="color:#475569;font-size:10px;text-transform:uppercase;letter-spacing:0.08em">Stake</div><div style="color:#f1f5f9;font-size:15px;font-weight:600">{stake}</div></div>
                     <div style="text-align:center"><div style="color:#475569;font-size:10px;text-transform:uppercase;letter-spacing:0.08em">Win</div><div style="color:#10b981;font-size:15px;font-weight:600">~${parlay.payout_per_unit:.0f}</div></div>
                     <div style="text-align:center"><div style="color:#475569;font-size:10px;text-transform:uppercase;letter-spacing:0.08em">EV</div><div style="color:{ev_col};font-size:15px;font-weight:600">{parlay.ev_pct:+.1%}</div></div>
                 </div>
             </div>
+            <div style="color:#64748b;font-size:12px;margin-top:-4px">{parlay.independence_notes[-1] if parlay.independence_notes else ''}</div>
         """)
 
         leg_rows = []

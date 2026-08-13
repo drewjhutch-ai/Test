@@ -28,17 +28,12 @@ from .layer_engine import PickCandidate
 # legs from the same game ever reach a parlay. Cross-game legs use ρ = 0.
 DEFAULT_SAME_GAME_RHO = 0.35
 
-# Parlay templates: (key, leg count, label). We attempt these in order and keep
-# only the ones the qualifying legs can actually support — nothing is forced.
-PARLAY_PLAN = [
-    ("P1", 2, "Core"),      # 2 safest (+EV) legs
-    ("P2", 3, "Core+"),     # 3 safest (+EV) legs
-    ("P3", 2, "Value"),     # 2 highest-payout (+EV) legs
-    ("P4", 3, "Longshot"),  # 3 highest-payout (+EV) legs
-]
-
-# Keep total leg count modest — hold and model error both explode past 3-4 legs.
-MAX_LEGS = 4
+# Parlay ladder: build one parlay at each leg count so the user can pick their
+# own risk/payoff rung. Legs come from the model's +EV picks (underdogs = big
+# payoffs), so every rung is a longshot with real edge on each leg — not -EV
+# chalk. Higher rungs pay more and hit less; that's the explicit tradeoff.
+LADDER_LEG_COUNTS = [2, 3, 4, 5, 6]
+MAX_LEGS = 6
 
 
 @dataclass
@@ -172,52 +167,51 @@ def _select_unique_game_legs(sorted_legs: list[ParlayLeg], n: int) -> list[Parla
     return chosen
 
 
+def hit_expectation(prob: float) -> str:
+    """Plain-language honest read on how often a parlay actually hits."""
+    if prob <= 0:
+        return "almost never hits"
+    if prob >= 0.50:
+        return f"hits ~{prob:.0%} — better than a coin flip"
+    one_in = max(2, round(1 / prob))
+    return f"hits ~{prob:.0%} (about 1 in {one_in}) — parlays lose most of the time"
+
+
 def build_full_parlay_card(legs: list[ParlayLeg]) -> list[Parlay]:
     """
-    Build parlays only from qualifying +EV independent legs. Nothing is forced:
-    if there aren't enough legs for a template, that template is skipped. Every
-    returned parlay is +EV by construction (product of +EV independent legs).
+    Build a 2-to-6 leg parlay ladder from the model's +EV picks. Each rung uses
+    the N strongest available legs (best hit-rate for that leg count); payouts
+    escalate and hit-rate drops as you climb. Every leg is individually +EV
+    (underdog value), so the parlays are longshots with real edge — not -EV
+    chalk. Nothing is forced: rungs beyond the available leg count are skipped.
     """
     eligible = [leg for leg in legs if leg.ev > 0]
     if len(eligible) < 2:
         return []
 
-    by_prob = sorted(eligible, key=lambda l: l.true_prob, reverse=True)      # safest first
-    by_odds = sorted(eligible, key=lambda l: l.decimal_odds, reverse=True)   # biggest payout first
+    by_prob = sorted(eligible, key=lambda l: l.true_prob, reverse=True)  # best legs first
+    max_available = len(by_prob)
 
     parlays: list[Parlay] = []
-    seen_signatures: set[tuple] = set()
-
-    for key, n_legs, label in PARLAY_PLAN:
-        n = min(n_legs, MAX_LEGS)
-        source = by_prob if label.startswith("Core") else by_odds
-        chosen = _select_unique_game_legs(source, n)
+    for n in LADDER_LEG_COUNTS:
+        if n > max_available:
+            break  # not enough distinct legs for this rung (or any higher one)
+        chosen = _select_unique_game_legs(by_prob, n)
         if len(chosen) < n:
-            continue
+            break
 
-        signature = tuple(sorted(f"{l.pick.game_id}:{l.market}" for l in chosen))
-        if signature in seen_signatures:
-            continue
-
-        # Stakes scale down as leg count / risk rises.
-        stake_high = {2: 20, 3: 10, 4: 5}.get(n, 5)
+        stake_high = {2: 20, 3: 15, 4: 10, 5: 5, 6: 5}.get(n, 5)
         parlay = Parlay(
-            label=f"{key} {label} ({n}-leg)",
+            label=f"{n}-Leg Parlay",
             legs=chosen,
             stake_low=max(5, stake_high // 2),
             stake_high=stake_high,
         )
         parlay.compute()
-        if parlay.ev_pct <= 0:
-            continue  # never show a -EV parlay
-
-        parlay.independence_notes.append(
-            "PASS: legs are independent (+EV) bets on separate games."
-        )
+        parlay.independence_notes.append(hit_expectation(parlay.combined_prob))
         parlays.append(parlay)
-        seen_signatures.add(signature)
 
-    return parlays
+    return parlays  # 2-leg first (best hit-rate) → 6-leg (biggest payout)
 
 
 def format_parlay_output(parlays: list[Parlay]) -> str:
