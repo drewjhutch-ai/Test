@@ -47,9 +47,12 @@ def _env_float(name: str, default: float) -> float:
 DEFAULT_MODEL_WEIGHT = _env_float("MODEL_WEIGHT", 0.25)
 
 # Minimum edge, in no-vig probability terms, of the blended estimate over the
-# market's fair probability before we will bet. ~3% is the "cushion beyond the
-# overround" that flipped a real public MLB model to profit in backtests.
-EDGE_CUSHION = _env_float("EDGE_CUSHION", 0.03)
+# market's fair probability before we will bet. Raised from 0.03 -> 0.04 after
+# 251 graded picks showed a genuine but THIN edge (avg CLV +0.26%, beat-close
+# 73%, ROI -1.3%): the model beats the close often but by small margins, so we
+# tighten to take only the fatter edges and let each bet carry more CLV.
+# Tune via the EDGE_CUSHION secret without a code change.
+EDGE_CUSHION = _env_float("EDGE_CUSHION", 0.04)
 
 # Fraction of full Kelly to stake. Full Kelly has a ~1/3 chance of halving the
 # bankroll before doubling it; quarter-Kelly captures most of the growth with a
