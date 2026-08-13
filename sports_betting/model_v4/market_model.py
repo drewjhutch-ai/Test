@@ -59,6 +59,13 @@ EDGE_CUSHION = _env_float("EDGE_CUSHION", 0.04)
 # fraction of the variance and buffers against our probability error.
 KELLY_FRACTION = _env_float("KELLY_FRACTION", 0.25)
 
+# Optional "favorites-only" comfort mode. When on, we still require a real edge
+# but ONLY bet when the backing side is the market favorite (no-vig prob > 0.5).
+# This raises hit-rate and lowers variance but discards +EV underdog value, so
+# expected ROI is equal-or-slightly-lower — a comfort tradeoff, not an upgrade.
+# Off by default; enable with the FAVORITES_ONLY secret.
+FAVORITES_ONLY = os.getenv("FAVORITES_ONLY", "").lower() in ("1", "true", "yes")
+
 # Probability clamp for blended output — avoids absurd extremes from bad data.
 _MIN_PROB = 0.02
 _MAX_PROB = 0.98

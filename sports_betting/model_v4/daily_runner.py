@@ -37,7 +37,7 @@ from .layer_engine import (
 from ..models.outcome_grader import grade_all_pending
 from ..models.weight_trainer import run_full_retrain, load_learned_weights
 from .parlay_builder import picks_to_legs, build_full_parlay_card
-from .market_model import assess_bet, EDGE_CUSHION, MODEL_VERSION
+from .market_model import assess_bet, EDGE_CUSHION, MODEL_VERSION, FAVORITES_ONLY
 from .nrfi_yrfi import NrfiProfile, rank_games_for_nrfi_parlay, build_nrfi_parlay
 from .pick_card import render_pick_card
 from ..collectors.hr_props_collector import run_hr_parlay_analysis
@@ -543,6 +543,13 @@ def run_daily_model(date_str: str | None = None, verbose: bool = True) -> dict:
                 f"vs blended {market['p_blend']:.1%} "
                 f"(edge {market['edge_market']:+.1%}, need +{int(EDGE_CUSHION*100)}%; "
                 f"price edge {market['edge_price']:+.1%})"
+            )
+        elif FAVORITES_ONLY and market["p_market_novig"] <= 0.5:
+            # Comfort mode: a real edge, but on a market underdog — skip it.
+            pick.tier = "SKIP"
+            pick.skip_reason = (
+                f"Favorites-only mode: +EV edge ({market['edge_market']:+.1%}) but "
+                f"{pick.backing_team} is a market underdog ({market['p_market_novig']:.1%})."
             )
         else:
             # Genuine +EV edge over the market → this IS a pick. Size by edge.
